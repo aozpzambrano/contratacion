@@ -6,6 +6,7 @@ use Filament\Forms\Components\DateTimePicker;
 use Filament\Forms\Components\TextInput;
 use Filament\Forms\Components\Toggle;
 use Filament\Schemas\Schema;
+use Filament\Forms\Components\Select;
 
 class UserForm
 {
@@ -33,6 +34,13 @@ class UserForm
                     ->required(fn (string $operation): bool => $operation === 'create')
                     ->maxLength(255),
 
+
+                TextInput::make('Cedula'),
+                TextInput::make('Cargo'),
+                TextInput::make('Unidad'),
+                Toggle::make('Activo')
+                    ->required(),
+
                 Select::make('roles')
                     ->label('Roles Asignados')
                     ->relationship('roles', 'name')
@@ -40,11 +48,7 @@ class UserForm
                     ->preload()
                     ->searchable(),
 
-                TextInput::make('Cedula'),
-                TextInput::make('Cargo'),
-                TextInput::make('Unidad'),
-                Toggle::make('Activo')
-                    ->required(),
+                
             ]);
     }
 }
