@@ -14,6 +14,10 @@ class Empresa extends Model
             $table->string('emp_nombre');
             $table->string('emp_director');
             $table->string('emp_cargo_director');
+            $table->string('emp_tipo_proceso');
+            $table->string('emp_prefijo');
+            $table->string('emp_anio');
+            $table->integer('emp_numerico');
             $table->timestamps();
         });
     }
