@@ -1,21 +1,12 @@
 FROM php:8.3-cli
 
-RUN apt-get update && apt-get install -y \
-    git \
-    curl \
-    libpng-dev \
-	libpq-dev \
-    libonig-dev \
-    libxml2-dev \
-    libzip-dev \
-    libicu-dev \
-    zip \
-    unzip \
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        git unzip libpq-dev libzip-dev libicu-dev \
     && docker-php-ext-configure intl \
-    && docker-php-ext-install pdo_mysql mbstring exif pcntl bcmath gd zip intl \
-    && apt-get clean && rm -rf /var/lib/apt/lists/*
+    && docker-php-ext-install pdo_pgsql zip pcntl intl \
+    && rm -rf /var/lib/apt/lists/*
 
-COPY --from=composer:latest /usr/bin/composer /usr/bin/composer
+COPY --from=composer:2 /usr/bin/composer /usr/bin/composer
 
 WORKDIR /var/www/html
 EXPOSE 8000
