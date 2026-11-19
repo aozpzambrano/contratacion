@@ -15,20 +15,35 @@ class UserForm
             ->components([
                 TextInput::make('name')
                     ->label('Nombre Completo')
-                    ->required(),
+                    ->required()
+                    ->maxLength(255),
+
                 TextInput::make('email')
-                    ->label('Correo Electrónico')
+                    ->label('Correo electrónico')
                     ->email()
-                    ->required(),
-                DateTimePicker::make('email_verified_at'),
+                    ->unique(ignoreRecord: true)
+                    ->required()
+                    ->maxLength(255),
+
                 TextInput::make('password')
                     ->label('Contraseña')
                     ->password()
-                    ->required(),
+                    ->revealable()
+                    ->dehydrated(fn (?string $state): bool => filled($state))
+                    ->required(fn (string $operation): bool => $operation === 'create')
+                    ->maxLength(255),
+
+                Select::make('roles')
+                    ->label('Roles Asignados')
+                    ->relationship('roles', 'name')
+                    ->multiple()
+                    ->preload()
+                    ->searchable(),
+
                 TextInput::make('Cedula'),
                 TextInput::make('Cargo'),
                 TextInput::make('Unidad'),
-                Toggle::make('activo')
+                Toggle::make('Activo')
                     ->required(),
             ]);
     }
