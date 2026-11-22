@@ -2,13 +2,11 @@
 
 namespace App\Filament\Resources\Users\Tables;
 
-use Filament\Actions\BulkActionGroup;
-use Filament\Actions\DeleteBulkAction;
 use Filament\Actions\EditAction;
 use Filament\Tables\Columns\IconColumn;
 use Filament\Tables\Columns\TextColumn;
+use Filament\Tables\Filters\TernaryFilter;
 use Filament\Tables\Table;
-
 
 class UsersTable
 {
@@ -16,49 +14,22 @@ class UsersTable
     {
         return $table
             ->columns([
-                TextColumn::make('name')
-                    ->label('Nombre Completo')
-                    ->searchable()
-                    ->sortable(),
-
-                TextColumn::make('email')
-                    ->label('Correo Institucional')
-                    ->searchable(),
-
-                TextColumn::make('roles.name')
-                    ->label('Roles')
-                    ->badge()
-                    ->searchable(),
-
-                TextColumn::make('created_at')
-                    ->label('Creado')
-                    ->dateTime('d/m/Y H:i')
-                    ->sortable()
+                TextColumn::make('name')->label('Nombre')->searchable()->sortable(),
+                TextColumn::make('email')->label('Correo')->searchable(),
+                TextColumn::make('cedula')->label('Cédula')->searchable(),
+                TextColumn::make('cargo')->label('Cargo')->searchable()->toggleable(),
+                TextColumn::make('unidad')->label('Unidad')->searchable()->toggleable(),
+                TextColumn::make('roles.nombre')->label('Roles')->badge(),
+                IconColumn::make('activo')->label('Activo')->boolean(),
+                TextColumn::make('created_at')->label('Creado')->dateTime('d/m/Y H:i')->sortable()
                     ->toggleable(isToggledHiddenByDefault: true),
-                TextColumn::make('updated_at')
-                    ->label('Actualizado')
-                    ->dateTime('d/m/Y H:i')
-                    ->sortable()
-                    ->toggleable(isToggledHiddenByDefault: true),
-                TextColumn::make('cedula')
-                    ->searchable(),
-                TextColumn::make('cargo')
-                    ->searchable(),
-                TextColumn::make('unidad')
-                    ->searchable(),
-                IconColumn::make('activo')
-                    ->boolean(),
             ])
             ->filters([
-                //
+                TernaryFilter::make('activo')->label('Activo'),
             ])
             ->recordActions([
                 EditAction::make(),
             ])
-            ->toolbarActions([
-                BulkActionGroup::make([
-                    DeleteBulkAction::make(),
-                ]),
-            ]);
+            ->defaultSort('name');
     }
 }
