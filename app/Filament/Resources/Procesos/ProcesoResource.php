@@ -34,7 +34,7 @@ class ProcesoResource extends Resource
 
     protected static ?string $pluralModelLabel = 'procesos';
 
-    protected static ?string $recordTitleAttribute = 'objeto';
+    protected static ?string $recordTitleAttribute = 'descripcion_producto';
 
     /** Cada usuario ve solo los procesos que le corresponden (ver Proceso::scopeVisiblesPara). */
     public static function getEloquentQuery(): Builder

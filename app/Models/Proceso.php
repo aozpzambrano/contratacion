@@ -20,7 +20,7 @@ class Proceso extends Model
      * solo cambian con las transiciones (aplicar_transicion_proceso) y un trigger lo impone.
      */
     protected $fillable = [
-        'tipo_proceso_id', 'anio', 'objeto', 'codigo_cpc', 'numero_pedido', 'observacion',
+        'tipo_proceso_id', 'anio', 'descripcion_producto', 'codigo_cpc', 'numero_pedido', 'observacion',
     ];
 
     /** Roles que ven todos los procesos. El resto ve solo los asignados (y la unidad requirente, los que creo). */

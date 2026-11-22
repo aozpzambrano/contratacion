@@ -8,5 +8,5 @@ class ProcesoItem extends Model
 {
     protected $table = 'proceso_items';
 
-    protected $fillable = ['numero_linea', 'cum', 'descripcion', 'cantidad'];
+    protected $fillable = ['numero_linea', 'cum', 'detalle', 'cantidad'];
 }

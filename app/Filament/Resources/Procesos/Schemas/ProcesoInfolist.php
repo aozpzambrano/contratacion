@@ -24,7 +24,7 @@ class ProcesoInfolist
                     TextEntry::make('codigo_cpc')->label('Código CPC')->placeholder('-'),
                     TextEntry::make('numero_pedido')->label('N.º de pedido'),
                     TextEntry::make('creador.name')->label('Creado por'),
-                    TextEntry::make('objeto')->label('Objeto')->columnSpanFull(),
+                    TextEntry::make('descripcion_producto')->label('Descripción del producto')->columnSpanFull(),
                     TextEntry::make('observacion')->label('Observación')->placeholder('-')->columnSpanFull(),
                 ]),
             Section::make('Ítems')
@@ -37,7 +37,7 @@ class ProcesoInfolist
                             TextEntry::make('numero_linea')->label('Línea'),
                             TextEntry::make('cum')->label('CUM'),
                             TextEntry::make('cantidad')->label('Cantidad')->numeric(),
-                            TextEntry::make('descripcion')->label('Descripción'),
+                            TextEntry::make('detalle')->label('Detalle'),
                         ]),
                 ]),
             Section::make('Historial de estados')

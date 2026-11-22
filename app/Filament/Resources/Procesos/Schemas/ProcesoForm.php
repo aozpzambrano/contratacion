@@ -29,8 +29,8 @@ class ProcesoForm
                         ->maxValue(2100)
                         ->default(now()->year)
                         ->required(),
-                    Textarea::make('objeto')
-                        ->label('Objeto de contratación')
+                    Textarea::make('descripcion_producto')
+                        ->label('Descripción del producto')
                         ->required()
                         ->columnSpanFull(),
                     TextInput::make('codigo_cpc')
@@ -66,8 +66,8 @@ class ProcesoForm
                                 ->numeric()
                                 ->minValue(1)
                                 ->required(),
-                            Textarea::make('descripcion')
-                                ->label('Descripción')
+                            Textarea::make('detalle')
+                                ->label('Detalle')
                                 ->required()
                                 ->rows(2)
                                 ->columnSpan(3),

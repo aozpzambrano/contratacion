@@ -50,13 +50,13 @@ BEGIN
     SELECT id INTO v_ini FROM estados_proceso WHERE codigo='INICIO';
 
     -- 1. Crear proceso: genera historial inicial
-    INSERT INTO procesos (tipo_proceso_id, anio, objeto, estado_macro_id, estado_proceso_id, creado_por)
+    INSERT INTO procesos (tipo_proceso_id, anio, descripcion_producto, estado_macro_id, estado_proceso_id, creado_por)
     VALUES (v_tp, 2026, 'Adquisicion de canulas', v_mac, v_ini, u_ur) RETURNING id INTO v_p;
     PERFORM pg_temp.verifica((SELECT count(*) FROM historial_estados_proceso WHERE proceso_id=v_p)=1,
         'crear proceso registra historial inicial');
-    INSERT INTO proceso_items (proceso_id,numero_linea,cum,descripcion,cantidad) VALUES
+    INSERT INTO proceso_items (proceso_id,numero_linea,cum,detalle,cantidad) VALUES
         (v_p,1,'12-700-001','Canula adulto',100000) RETURNING id INTO v_it1;
-    INSERT INTO proceso_items (proceso_id,numero_linea,cum,descripcion,cantidad) VALUES
+    INSERT INTO proceso_items (proceso_id,numero_linea,cum,detalle,cantidad) VALUES
         (v_p,2,'12-700-003','Canula neonatal',20000) RETURNING id INTO v_it2;
 
     -- 2. El estado no se puede cambiar por UPDATE directo
@@ -201,7 +201,7 @@ BEGIN
         'historial del proceso con 15 movimientos');
 
     -- 9. Devolucion y reapertura (el analista decide segun el memorando)
-    INSERT INTO procesos (tipo_proceso_id,anio,objeto,estado_macro_id,estado_proceso_id,creado_por)
+    INSERT INTO procesos (tipo_proceso_id,anio,descripcion_producto,estado_macro_id,estado_proceso_id,creado_por)
         VALUES (v_tp,2026,'Proceso devuelto',v_mac,v_ini,u_ur) RETURNING id INTO v_p2;
     INSERT INTO asignaciones_proceso (proceso_id,user_id,rol_id,fase_id,asignado_por)
         VALUES (v_p2,u_ca,(SELECT id FROM roles WHERE codigo='COMPRAS_ANALISTA'),f_pre,u_cj);
@@ -224,7 +224,7 @@ BEGIN
         'nuevo ciclo permite otra publicacion secuencia 1 con el mismo NC');
 
     -- devolucion que no autoriza reapertura: solo se puede cerrar
-    INSERT INTO procesos (tipo_proceso_id,anio,objeto,estado_macro_id,estado_proceso_id,creado_por)
+    INSERT INTO procesos (tipo_proceso_id,anio,descripcion_producto,estado_macro_id,estado_proceso_id,creado_por)
         VALUES (v_tp,2026,'Sin reapertura',v_mac,v_ini,u_ur) RETURNING id INTO v_p3;
     INSERT INTO asignaciones_proceso (proceso_id,user_id,rol_id,fase_id,asignado_por)
         VALUES (v_p3,u_ca,(SELECT id FROM roles WHERE codigo='COMPRAS_ANALISTA'),f_pre,u_cj);
@@ -238,7 +238,7 @@ BEGIN
     PERFORM pg_temp.verifica(true,'devolucion sin reapertura solo permite cerrar');
 
     -- 10. Documentos requeridos configurables por transicion
-    INSERT INTO procesos (tipo_proceso_id,anio,objeto,estado_macro_id,estado_proceso_id,creado_por)
+    INSERT INTO procesos (tipo_proceso_id,anio,descripcion_producto,estado_macro_id,estado_proceso_id,creado_por)
         VALUES (v_tp,2026,'Con requisitos',v_mac,v_ini,u_ur) RETURNING id INTO v_p3;
     INSERT INTO asignaciones_proceso (proceso_id,user_id,rol_id,fase_id,asignado_por)
         VALUES (v_p3,u_ur,(SELECT id FROM roles WHERE codigo='UNIDAD_REQUIRENTE'),f_prep,u_cj);

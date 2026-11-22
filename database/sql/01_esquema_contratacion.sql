@@ -266,7 +266,7 @@ CREATE TABLE procesos (
     codigo           varchar(40) UNIQUE,   -- lo asigna Compras antes de publicar
     tipo_proceso_id  bigint NOT NULL REFERENCES tipos_proceso(id),
     anio             smallint NOT NULL CHECK (anio BETWEEN 2000 AND 2100),
-    objeto           text NOT NULL,
+    descripcion_producto text NOT NULL,
     codigo_cpc       varchar(20),
     numero_pedido    smallint NOT NULL DEFAULT 1 CHECK (numero_pedido >= 1),
     estado_macro_id  bigint NOT NULL REFERENCES estados_macro(id),
@@ -286,7 +286,7 @@ CREATE TABLE proceso_items (
     proceso_id   bigint NOT NULL REFERENCES procesos(id),
     numero_linea smallint NOT NULL CHECK (numero_linea >= 1),
     cum          varchar(30)  NOT NULL,
-    descripcion  text NOT NULL,
+    detalle      text NOT NULL,
     cantidad     bigint NOT NULL CHECK (cantidad > 0),
     created_at   timestamptz NOT NULL DEFAULT now(),
     updated_at   timestamptz NOT NULL DEFAULT now(),
@@ -1430,7 +1430,7 @@ SELECT o.id AS oferta_id, o.proceso_id, o.publicacion_id, o.proveedor_id,
  GROUP BY o.id;
 
 CREATE VIEW v_procesos AS
-SELECT p.id AS proceso_id, p.codigo, p.anio, p.objeto, p.codigo_cpc, p.numero_pedido, p.ciclo,
+SELECT p.id AS proceso_id, p.codigo, p.anio, p.descripcion_producto, p.codigo_cpc, p.numero_pedido, p.ciclo,
        tp.nombre AS tipo_proceso,
        f.nombre  AS fase, em.codigo AS estado_macro_codigo, em.nombre AS estado_macro,
        ep.codigo AS estado_codigo, ep.nombre AS estado_operativo,
@@ -1480,8 +1480,8 @@ SELECT pr.id AS proveedor_id, pr.ruc, pr.razon_social,
 
 -- Equivalente a la hoja del Excel: una fila por linea de producto
 CREATE VIEW v_matriz_contratacion AS
-SELECT p.id AS proceso_id, p.codigo, p.objeto, p.codigo_cpc, p.numero_pedido, p.ciclo,
-       pi.numero_linea, pi.cum, pi.descripcion AS producto, pi.cantidad,
+SELECT p.id AS proceso_id, p.codigo, p.descripcion_producto, p.codigo_cpc, p.numero_pedido, p.ciclo,
+       pi.numero_linea, pi.cum, pi.detalle AS producto, pi.cantidad,
        vp.estado_macro, vp.estado_operativo, vp.analista_responsable, vp.unidad_requirente,
        ref.precio_referencial,
        ofe.ofertas_recibidas, ofe.mejor_precio_unitario, ofe.mejor_proveedor,

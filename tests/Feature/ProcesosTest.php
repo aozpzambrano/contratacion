@@ -20,9 +20,9 @@ class ProcesosTest extends TestCase
 {
     use RefreshDatabase;
 
-    private function proceso(User $creador, string $objeto = 'Medicamentos de prueba'): Proceso
+    private function proceso(User $creador, string $descripcion = 'Medicamentos de prueba'): Proceso
     {
-        $p = new Proceso(['tipo_proceso_id' => TipoProceso::value('id'), 'anio' => 2026, 'objeto' => $objeto]);
+        $p = new Proceso(['tipo_proceso_id' => TipoProceso::value('id'), 'anio' => 2026, 'descripcion_producto' => $descripcion]);
         $p->forceFill([
             'creado_por' => $creador->id,
             'estado_macro_id' => EstadoMacro::where('codigo', 'PREPARATORIA')->value('id'),
@@ -52,9 +52,9 @@ class ProcesosTest extends TestCase
             ->fillForm([
                 'tipo_proceso_id' => TipoProceso::value('id'),
                 'anio' => 2026,
-                'objeto' => 'Adquisicion de medicamentos',
+                'descripcion_producto' => 'Adquisicion de medicamentos',
                 'numero_pedido' => 1,
-                'items' => [['cum' => '12345-1', 'cantidad' => 10, 'descripcion' => 'Paracetamol 500 mg']],
+                'items' => [['cum' => '12345-1', 'cantidad' => 10, 'detalle' => 'Paracetamol 500 mg']],
             ])
             ->call('create')
             ->assertHasNoFormErrors();
@@ -117,9 +117,9 @@ class ProcesosTest extends TestCase
             ->fillForm([
                 'tipo_proceso_id' => TipoProceso::value('id'),
                 'anio' => 2026,
-                'objeto' => 'Proceso a enviar',
+                'descripcion_producto' => 'Proceso a enviar',
                 'numero_pedido' => 1,
-                'items' => [['cum' => '1', 'cantidad' => 1, 'descripcion' => 'x']],
+                'items' => [['cum' => '1', 'cantidad' => 1, 'detalle' => 'x']],
             ])
             ->call('create');
 

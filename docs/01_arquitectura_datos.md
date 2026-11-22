@@ -167,7 +167,7 @@ Notación: **PK**, *FK*, `U` único, `N` nullable. Se omiten `created_at`/`updat
 
 | Tabla | Columnas | Notas |
 |---|---|---|
-| `procesos` | `id`, `codigo` U, *tipo_proceso_id*, `anio` smallint, `objeto`, `codigo_cpc` N, `numero_pedido` smallint default 1, *proceso_origen_id* N, *estado_macro_id*, *estado_proceso_id*, `observacion` N, *creado_por* (user_id), `deleted_at` N | `proceso_origen_id`: reproceso/reapertura (006 → 070). |
+| `procesos` | `id`, `codigo` U, *tipo_proceso_id*, `anio` smallint, `descripcion_producto`, `codigo_cpc` N, `numero_pedido` smallint default 1, *proceso_origen_id* N, *estado_macro_id*, *estado_proceso_id*, `observacion` N, *creado_por* (user_id), `deleted_at` N | `proceso_origen_id`: reproceso/reapertura (006 → 070). |
 | `proceso_items` | `id`, *proceso_id*, `numero_linea`, `cum`, `descripcion`, `cantidad` bigint | U(`proceso_id`,`numero_linea`). Líneas de producto. |
 | `precios_referenciales` | `id`, *proceso_item_id*, *proveedor_id* N, `fuente`, `precio_unitario` | Excel "PRECIOS MSP" (K, L). `fuente` por confirmar. |
 | `asignaciones_proceso` | `id`, *proceso_id*, *user_id*, *rol_id*, *fase_id*, *etapa_id* N, *actividad_id* N, *asignado_por*, `fecha_inicio`, `fecha_fin` N, `activo` | Quién interviene en cada fase/etapa del proceso. Base del control "por responsable". |
@@ -214,8 +214,8 @@ Notación: **PK**, *FK*, `U` único, `N` nullable. Se omiten `created_at`/`updat
 | A (Item) | Descartada: es un contador; el identificador es `procesos.codigo`. |
 | B | `procesos.codigo` |
 | C | `procesos.codigo_cpc` |
-| D | `procesos.objeto` |
-| E | `proceso_items.descripcion` |
+| D | `procesos.descripcion_producto` |
+| E | `proceso_items.detalle` |
 | F | `proceso_items.cum` |
 | G | `proceso_items.cantidad` |
 | H | `estados_proceso` (mapeo en §5) |
