@@ -30,7 +30,21 @@ class UserFactory extends Factory
             'email_verified_at' => now(),
             'password' => static::$password ??= Hash::make('password'),
             'remember_token' => Str::random(10),
+            'activo' => true,
         ];
+    }
+
+    public function inactivo(): static
+    {
+        return $this->state(fn (array $attributes) => ['activo' => false]);
+    }
+
+    /** Usuario con los roles indicados (codigos de la tabla roles). */
+    public function conRoles(string ...$codigos): static
+    {
+        return $this->afterCreating(function (User $usuario) use ($codigos) {
+            $usuario->roles()->attach(\App\Models\Rol::whereIn('codigo', $codigos)->pluck('id'));
+        });
     }
 
     /**

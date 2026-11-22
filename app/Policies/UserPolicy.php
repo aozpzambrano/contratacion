@@ -2,71 +2,21 @@
 
 namespace App\Policies;
 
-use Illuminate\Foundation\Auth\User as AuthUser;
-use Illuminate\Auth\Access\HandlesAuthorization;
+use App\Models\User;
 
-class UserPolicy
+class UserPolicy extends PoliticaPorPermiso
 {
-    use HandlesAuthorization;
-    
-    public function viewAny(AuthUser $authUser): bool
+    protected function modulo(): string
     {
-        return $authUser->can('ViewAny:User');
+        return 'usuarios';
     }
 
-    public function view(AuthUser $authUser): bool
+    /**
+     * Un usuario con historial no puede borrarse (las tablas de historial lo referencian):
+     * se desactiva con el campo "activo". Nadie puede eliminarse a si mismo.
+     */
+    public function delete(User $user, mixed $registro = null): bool
     {
-        return $authUser->can('View:User');
+        return parent::delete($user, $registro) && $registro?->id !== $user->id;
     }
-
-    public function create(AuthUser $authUser): bool
-    {
-        return $authUser->can('Create:User');
-    }
-
-    public function update(AuthUser $authUser): bool
-    {
-        return $authUser->can('Update:User');
-    }
-
-    public function delete(AuthUser $authUser): bool
-    {
-        return $authUser->can('Delete:User');
-    }
-
-    public function deleteAny(AuthUser $authUser): bool
-    {
-        return $authUser->can('DeleteAny:User');
-    }
-
-    public function restore(AuthUser $authUser): bool
-    {
-        return $authUser->can('Restore:User');
-    }
-
-    public function forceDelete(AuthUser $authUser): bool
-    {
-        return $authUser->can('ForceDelete:User');
-    }
-
-    public function forceDeleteAny(AuthUser $authUser): bool
-    {
-        return $authUser->can('ForceDeleteAny:User');
-    }
-
-    public function restoreAny(AuthUser $authUser): bool
-    {
-        return $authUser->can('RestoreAny:User');
-    }
-
-    public function replicate(AuthUser $authUser): bool
-    {
-        return $authUser->can('Replicate:User');
-    }
-
-    public function reorder(AuthUser $authUser): bool
-    {
-        return $authUser->can('Reorder:User');
-    }
-
 }

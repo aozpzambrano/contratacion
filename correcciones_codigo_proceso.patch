@@ -1,0 +1,548 @@
+From 4f13d566336b38bcfd5772cf8bf8f5919057a50b Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Sun, 22 Nov 2026 11:31:19 -0500
+Subject: [PATCH] Codigo del proceso configurable; elimina anio y numero_pedido
+
+- tipos_proceso.prefijo, parametros (prefijo_institucion, zona_horaria, digitos_codigo_proceso).
+- secuencias_codigo_proceso (por tipo y anio) y asignar_codigo_proceso() con permiso procesos.asignar_codigo.
+- Trigger que protege el codigo; la transicion publicar exige codigo.
+- Pruebas SQL (25 verificaciones) y de Laravel.
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_013pP9mVZYpKpM1XxKvHQvGc
+---
+ .../Procesos/Schemas/ProcesoForm.php          |  13 ---
+ .../Procesos/Schemas/ProcesoInfolist.php      |   2 -
+ .../Procesos/Tables/ProcesosTable.php         |   3 -
+ app/Models/Proceso.php                        |   2 +-
+ database/sql/01_esquema_contratacion.sql      | 109 ++++++++++++++++--
+ database/sql/02_pruebas_esquema.sql           |  58 ++++++++--
+ docs/01_arquitectura_datos.md                 |  25 +++-
+ tests/Feature/CatalogoSeguridadTest.php       |  19 +++
+ tests/Feature/ProcesosTest.php                |   6 +-
+ 9 files changed, 194 insertions(+), 43 deletions(-)
+
+diff --git a/app/Filament/Resources/Procesos/Schemas/ProcesoForm.php b/app/Filament/Resources/Procesos/Schemas/ProcesoForm.php
+index 8376a63..2c30016 100644
+--- a/app/Filament/Resources/Procesos/Schemas/ProcesoForm.php
++++ b/app/Filament/Resources/Procesos/Schemas/ProcesoForm.php
+@@ -22,13 +22,6 @@ public static function configure(Schema $schema): Schema
+                         ->relationship('tipoProceso', 'nombre', fn ($query) => $query->where('activo', true))
+                         ->default(fn () => \App\Models\TipoProceso::where('activo', true)->orderBy('id')->value('id'))
+                         ->required(),
+-                    TextInput::make('anio')
+-                        ->label('Año')
+-                        ->numeric()
+-                        ->minValue(2000)
+-                        ->maxValue(2100)
+-                        ->default(now()->year)
+-                        ->required(),
+                     Textarea::make('descripcion_producto')
+                         ->label('Descripción del producto')
+                         ->required()
+@@ -36,12 +29,6 @@ public static function configure(Schema $schema): Schema
+                     TextInput::make('codigo_cpc')
+                         ->label('Código CPC')
+                         ->maxLength(20),
+-                    TextInput::make('numero_pedido')
+-                        ->label('N.º de pedido')
+-                        ->numeric()
+-                        ->minValue(1)
+-                        ->default(1)
+-                        ->required(),
+                     Textarea::make('observacion')
+                         ->label('Observación')
+                         ->columnSpanFull(),
+diff --git a/app/Filament/Resources/Procesos/Schemas/ProcesoInfolist.php b/app/Filament/Resources/Procesos/Schemas/ProcesoInfolist.php
+index 600b998..78e99c7 100644
+--- a/app/Filament/Resources/Procesos/Schemas/ProcesoInfolist.php
++++ b/app/Filament/Resources/Procesos/Schemas/ProcesoInfolist.php
+@@ -19,10 +19,8 @@ public static function configure(Schema $schema): Schema
+                     TextEntry::make('estadoMacro.nombre')->label('Fase')->badge(),
+                     TextEntry::make('estadoProceso.nombre')->label('Estado')->badge(),
+                     TextEntry::make('tipoProceso.nombre')->label('Tipo'),
+-                    TextEntry::make('anio')->label('Año'),
+                     TextEntry::make('ciclo')->label('Ciclo'),
+                     TextEntry::make('codigo_cpc')->label('Código CPC')->placeholder('-'),
+-                    TextEntry::make('numero_pedido')->label('N.º de pedido'),
+                     TextEntry::make('creador.name')->label('Creado por'),
+                     TextEntry::make('descripcion_producto')->label('Descripción del producto')->columnSpanFull(),
+                     TextEntry::make('observacion')->label('Observación')->placeholder('-')->columnSpanFull(),
+diff --git a/app/Filament/Resources/Procesos/Tables/ProcesosTable.php b/app/Filament/Resources/Procesos/Tables/ProcesosTable.php
+index b842198..af180b7 100644
+--- a/app/Filament/Resources/Procesos/Tables/ProcesosTable.php
++++ b/app/Filament/Resources/Procesos/Tables/ProcesosTable.php
+@@ -19,7 +19,6 @@ public static function configure(Table $table): Table
+                 TextColumn::make('id')->label('N.º')->sortable(),
+                 TextColumn::make('codigo')->label('Código')->searchable()->placeholder('Sin asignar'),
+                 TextColumn::make('descripcion_producto')->label('Descripción del producto')->limit(60)->searchable()->wrap(),
+-                TextColumn::make('anio')->label('Año')->sortable(),
+                 TextColumn::make('estadoMacro.nombre')->label('Fase')->badge(),
+                 TextColumn::make('estadoProceso.nombre')->label('Estado')->badge(),
+                 TextColumn::make('ciclo')->label('Ciclo')->toggleable(),
+@@ -32,8 +31,6 @@ public static function configure(Table $table): Table
+                     ->options(fn () => EstadoMacro::orderBy('orden')->pluck('nombre', 'id')->all()),
+                 SelectFilter::make('estado_proceso_id')->label('Estado')
+                     ->options(fn () => EstadoProceso::orderBy('orden')->pluck('nombre', 'id')->all()),
+-                SelectFilter::make('anio')->label('Año')
+-                    ->options(fn () => \App\Models\Proceso::query()->distinct()->orderByDesc('anio')->pluck('anio', 'anio')->all()),
+             ])
+             ->recordActions([
+                 ViewAction::make(),
+diff --git a/app/Models/Proceso.php b/app/Models/Proceso.php
+index bddd83f..2508a53 100644
+--- a/app/Models/Proceso.php
++++ b/app/Models/Proceso.php
+@@ -20,7 +20,7 @@ class Proceso extends Model
+      * solo cambian con las transiciones (aplicar_transicion_proceso) y un trigger lo impone.
+      */
+     protected $fillable = [
+-        'tipo_proceso_id', 'anio', 'descripcion_producto', 'codigo_cpc', 'numero_pedido', 'observacion',
++        'tipo_proceso_id', 'descripcion_producto', 'codigo_cpc', 'observacion',
+     ];
+ 
+     /** Roles que ven todos los procesos. El resto ve solo los asignados (y la unidad requirente, los que creo). */
+diff --git a/database/sql/01_esquema_contratacion.sql b/database/sql/01_esquema_contratacion.sql
+index 362c1ec..473dc83 100644
+--- a/database/sql/01_esquema_contratacion.sql
++++ b/database/sql/01_esquema_contratacion.sql
+@@ -130,6 +130,7 @@ CREATE TABLE estados_proceso (
+     orden      smallint NOT NULL,
+     es_inicial boolean NOT NULL DEFAULT false,
+     es_final   boolean NOT NULL DEFAULT false,
++    permite_asignar_codigo boolean NOT NULL DEFAULT false,  -- estados en los que Compras genera el codigo del proceso
+     color      varchar(20),
+     activo     boolean NOT NULL DEFAULT true,
+     created_at timestamptz NOT NULL DEFAULT now(),
+@@ -166,6 +167,7 @@ CREATE TABLE tipos_proceso (
+     id         bigint GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
+     codigo     varchar(60)  NOT NULL UNIQUE,
+     nombre     varchar(150) NOT NULL,
++    prefijo    varchar(10)  NOT NULL CHECK (prefijo ~ '^[A-Z0-9]+$'),  -- inicia el codigo del proceso: PE-AILEP-2026-001
+     activo     boolean NOT NULL DEFAULT true,
+     created_at timestamptz NOT NULL DEFAULT now(),
+     updated_at timestamptz NOT NULL DEFAULT now()
+@@ -265,10 +267,8 @@ CREATE TABLE procesos (
+     id               bigint GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
+     codigo           varchar(40) UNIQUE,   -- lo asigna Compras antes de publicar
+     tipo_proceso_id  bigint NOT NULL REFERENCES tipos_proceso(id),
+-    anio             smallint NOT NULL CHECK (anio BETWEEN 2000 AND 2100),
+     descripcion_producto text NOT NULL,
+     codigo_cpc       varchar(20),
+-    numero_pedido    smallint NOT NULL DEFAULT 1 CHECK (numero_pedido >= 1),
+     estado_macro_id  bigint NOT NULL REFERENCES estados_macro(id),
+     estado_proceso_id bigint NOT NULL REFERENCES estados_proceso(id),
+     ciclo            smallint NOT NULL DEFAULT 1 CHECK (ciclo >= 1),
+@@ -278,6 +278,15 @@ CREATE TABLE procesos (
+     updated_at       timestamptz NOT NULL DEFAULT now(),
+     deleted_at       timestamptz
+ );
++-- Contador del codigo del proceso: una fila por tipo de proceso y anio (reinicia cada anio)
++CREATE TABLE secuencias_codigo_proceso (
++    tipo_proceso_id bigint   NOT NULL REFERENCES tipos_proceso(id),
++    anio            smallint NOT NULL CHECK (anio BETWEEN 2000 AND 2100),
++    ultimo          integer  NOT NULL CHECK (ultimo >= 1),
++    updated_at      timestamptz NOT NULL DEFAULT now(),
++    PRIMARY KEY (tipo_proceso_id, anio)
++);
++
+ CREATE INDEX procesos_estado_idx ON procesos (estado_proceso_id);
+ CREATE INDEX procesos_macro_idx  ON procesos (estado_macro_id);
+ 
+@@ -644,6 +653,11 @@ LANGUAGE sql STABLE AS $$
+     SELECT valor::integer FROM parametros WHERE clave = p_clave
+ $$;
+ 
++CREATE FUNCTION parametro_texto(p_clave text) RETURNS text
++LANGUAGE sql STABLE AS $$
++    SELECT valor FROM parametros WHERE clave = p_clave
++$$;
++
+ -- Tablas historicas: no se permite UPDATE ni DELETE
+ CREATE FUNCTION fn_bloquear_modificacion() RETURNS trigger
+ LANGUAGE plpgsql AS $$
+@@ -827,6 +841,8 @@ BEGIN
+                          AND NOT EXISTS (SELECT 1 FROM correcciones c WHERE c.observacion_id = ob.id)) THEN
+                 RETURN 'Existen observaciones pendientes de correccion';
+             END IF;
++        WHEN 'requiere_codigo' THEN
++            IF v_p.codigo IS NULL THEN RETURN 'El proceso debe tener codigo antes de esta transicion'; END IF;
+         WHEN 'requiere_responsable' THEN
+             IF NOT EXISTS (SELECT 1 FROM asignaciones_proceso a JOIN roles ro ON ro.id = a.rol_id
+                             WHERE a.proceso_id = p_id AND a.activo AND ro.codigo = r.value #>> '{}') THEN
+@@ -872,6 +888,77 @@ BEGIN
+ END $$;
+ 
+ -- Aplica una transicion de proceso: autoriza, valida, cambia estado, registra historial
++-- El codigo solo se asigna con asignar_codigo_proceso() y no se puede cambiar despues
++CREATE FUNCTION fn_proteger_codigo() RETURNS trigger LANGUAGE plpgsql AS $$
++BEGIN
++    IF NEW.codigo IS DISTINCT FROM OLD.codigo THEN
++        IF OLD.codigo IS NOT NULL THEN
++            RAISE EXCEPTION 'El codigo del proceso no puede modificarse una vez asignado';
++        END IF;
++        IF COALESCE(current_setting('app.asignando_codigo', true), '') <> 'on' THEN
++            RAISE EXCEPTION 'El codigo del proceso solo se asigna con asignar_codigo_proceso()';
++        END IF;
++    END IF;
++    RETURN NEW;
++END $$;
++CREATE TRIGGER procesos_proteger_codigo BEFORE UPDATE OF codigo ON procesos
++    FOR EACH ROW EXECUTE FUNCTION fn_proteger_codigo();
++
++-- Genera el codigo: <prefijo del tipo>-<prefijo institucional>-<anio>-<numero>, p. ej. PE-AILEP-2026-001.
++-- El anio es el del momento de generarlo (zona horaria del parametro zona_horaria); el numero reinicia cada anio.
++CREATE FUNCTION asignar_codigo_proceso(p_proceso_id bigint, p_user_id bigint) RETURNS text
++LANGUAGE plpgsql AS $$
++DECLARE
++    v_p procesos%ROWTYPE; v_ep estados_proceso%ROWTYPE; v_perm permisos%ROWTYPE;
++    v_fase bigint; v_prefijo text; v_anio int; v_n int; v_dig int; v_codigo text;
++BEGIN
++    SELECT * INTO v_p FROM procesos WHERE id = p_proceso_id AND deleted_at IS NULL FOR UPDATE;
++    IF NOT FOUND THEN RAISE EXCEPTION 'El proceso no existe'; END IF;
++
++    SELECT * INTO v_perm FROM permisos WHERE codigo = 'procesos.asignar_codigo' AND activo;
++    SELECT fase_id INTO v_fase FROM estados_macro WHERE id = v_p.estado_macro_id;
++    IF v_perm.id IS NULL OR NOT usuario_puede(p_user_id, v_perm.id, v_fase) THEN
++        RAISE EXCEPTION 'El usuario no tiene el permiso procesos.asignar_codigo en esta fase'
++            USING ERRCODE = 'insufficient_privilege';
++    END IF;
++    IF v_perm.requiere_asignacion AND NOT EXISTS (
++        SELECT 1 FROM asignaciones_proceso a
++         WHERE a.proceso_id = v_p.id AND a.user_id = p_user_id AND a.activo) THEN
++        RAISE EXCEPTION 'El usuario no esta asignado a este proceso'
++            USING ERRCODE = 'insufficient_privilege';
++    END IF;
++
++    IF v_p.codigo IS NOT NULL THEN
++        RAISE EXCEPTION 'El proceso ya tiene codigo (%)', v_p.codigo;
++    END IF;
++    SELECT * INTO v_ep FROM estados_proceso WHERE id = v_p.estado_proceso_id;
++    IF NOT v_ep.permite_asignar_codigo THEN
++        RAISE EXCEPTION 'En el estado "%" no se puede asignar el codigo del proceso', v_ep.nombre;
++    END IF;
++
++    v_anio := EXTRACT(year FROM now() AT TIME ZONE COALESCE(parametro_texto('zona_horaria'), 'America/Guayaquil'))::int;
++    v_dig  := COALESCE(parametro_entero('digitos_codigo_proceso'), 3);
++    SELECT prefijo INTO v_prefijo FROM tipos_proceso WHERE id = v_p.tipo_proceso_id;
++
++    -- El upsert bloquea la fila del contador: dos analistas no obtienen el mismo numero
++    INSERT INTO secuencias_codigo_proceso (tipo_proceso_id, anio, ultimo)
++    VALUES (v_p.tipo_proceso_id, v_anio, 1)
++    ON CONFLICT (tipo_proceso_id, anio)
++    DO UPDATE SET ultimo = secuencias_codigo_proceso.ultimo + 1, updated_at = now()
++    RETURNING ultimo INTO v_n;
++
++    v_codigo := concat_ws('-', v_prefijo, NULLIF(parametro_texto('prefijo_institucion'), ''), v_anio::text,
++                          repeat('0', GREATEST(v_dig - length(v_n::text), 0)) || v_n::text);
++
++    PERFORM set_config('app.asignando_codigo', 'on', true);
++    UPDATE procesos SET codigo = v_codigo, updated_at = now() WHERE id = v_p.id;
++    PERFORM set_config('app.asignando_codigo', '', true);
++
++    INSERT INTO auditoria (user_id, evento, entidad, entidad_id, valores_nuevos)
++    VALUES (p_user_id, 'proceso.codigo_asignado', 'procesos', v_p.id, jsonb_build_object('codigo', v_codigo));
++    RETURN v_codigo;
++END $$;
++
+ CREATE FUNCTION aplicar_transicion_proceso(
+     p_proceso_id bigint, p_codigo text, p_user_id bigint, p_comentario text DEFAULT NULL
+ ) RETURNS bigint
+@@ -1093,6 +1180,7 @@ INSERT INTO permisos (codigo, nombre, modulo, requiere_asignacion) VALUES
+  ('procesos.crear','Crear procesos','procesos',false),
+  ('procesos.editar','Editar procesos','procesos',true),
+  ('procesos.asignar_responsables','Asignar responsables','procesos',false),
++ ('procesos.asignar_codigo','Generar el codigo del proceso','procesos',true),
+  ('procesos.enviar_a_revision','Enviar proceso a revision','procesos',true),
+  ('procesos.autorizar_transicion','Autorizar transiciones de proceso','procesos',true),
+  ('procesos.devolver','Devolver expediente','procesos',true),
+@@ -1150,7 +1238,7 @@ SELECT DISTINCT r.id, p.id
+     ('COMPRAS_JEFE','documentos.asignar_revisor'),
+     ('COMPRAS_JEFE','reportes.%'),
+     ('COMPRAS_ANALISTA','%.ver'),('COMPRAS_ANALISTA','procesos.editar'),
+-    ('COMPRAS_ANALISTA','procesos.autorizar_transicion'),('COMPRAS_ANALISTA','procesos.devolver'),
++    ('COMPRAS_ANALISTA','procesos.autorizar_transicion'),('COMPRAS_ANALISTA','procesos.devolver'),('COMPRAS_ANALISTA','procesos.asignar_codigo'),
+     ('COMPRAS_ANALISTA','procesos.reabrir'),('COMPRAS_ANALISTA','procesos.cerrar'),
+     ('COMPRAS_ANALISTA','documentos.subir'),('COMPRAS_ANALISTA','documentos.descargar'),
+     ('COMPRAS_ANALISTA','documentos.revisar'),('COMPRAS_ANALISTA','documentos.aprobar'),
+@@ -1221,6 +1309,7 @@ INSERT INTO estados_proceso (codigo, nombre, orden, es_inicial, es_final) VALUES
+  ('ADMINISTRACION_CONTRATO','Administracion de Contrato',12,false,false),
+  ('CIERRE','Cierre',13,false,true),
+  ('PARA_REAPERTURA','Para reapertura',14,false,false);
++UPDATE estados_proceso SET permite_asignar_codigo = true WHERE codigo = 'PARA_PUBLICAR';
+ 
+ INSERT INTO estados_documento (codigo, nombre, orden, grupo, es_inicial, es_final) VALUES
+  ('BORRADOR','Borrador',1,'pendiente',true,false),
+@@ -1241,7 +1330,7 @@ INSERT INTO estados_oferta (codigo, nombre, orden, resultado, es_inicial, es_fin
+  ('SELECCIONADA','Seleccionada',6,'favorable',false,false),
+  ('ADJUDICADA','Adjudicada',7,'favorable',false,true);
+ 
+-INSERT INTO tipos_proceso (codigo, nombre) VALUES ('ABASTECIMIENTO_CENTRALIZADO','Abastecimiento Centralizado');
++INSERT INTO tipos_proceso (codigo, nombre, prefijo) VALUES ('ABASTECIMIENTO_CENTRALIZADO','Abastecimiento Centralizado','PE');
+ 
+ INSERT INTO tipos_designacion (codigo, nombre, monto_minimo, orden) VALUES
+  ('DELEGADO','Servidor Afin (delegado)',0,1),
+@@ -1251,7 +1340,10 @@ INSERT INTO tipos_designacion (codigo, nombre, monto_minimo, orden) VALUES
+ INSERT INTO parametros (clave, valor, tipo, descripcion) VALUES
+  ('minimo_proformas','3','entero','Numero minimo de proformas para continuar a comision'),
+  ('maximo_publicaciones','2','entero','Maximo de publicaciones por ciclo del proceso'),
+- ('tamano_maximo_documento_mb','20','entero','Tamano maximo de archivo por defecto');
++ ('tamano_maximo_documento_mb','20','entero','Tamano maximo de archivo por defecto'),
++ ('prefijo_institucion','AILEP','texto','Segunda parte del codigo del proceso: PE-AILEP-2026-001'),
++ ('zona_horaria','America/Guayaquil','texto','Zona horaria para calcular el anio del codigo del proceso'),
++ ('digitos_codigo_proceso','3','entero','Cantidad de digitos del numero del codigo del proceso');
+ 
+ INSERT INTO etapas (fase_id, codigo, nombre, orden)
+ SELECT f.id, m.codigo, m.nombre, m.orden
+@@ -1355,7 +1447,7 @@ SELECT eo.id, ed.id, m.codigo, m.nombre, em.id, p.id, m.coment, m.reglas::jsonb
+     ('EN_CORRECCION','EN_REVISION','reenviar_a_revision','Reenviar a revision',NULL,'procesos.enviar_a_revision',false,'{}'),
+     ('EN_REVISION','PARA_LEGALIZAR','validar_documentacion','Validar documentacion',NULL,'documentos.aprobar',false,'{"sin_observaciones_pendientes": true}'),
+     ('PARA_LEGALIZAR','PARA_PUBLICAR','autorizar_publicacion','Autorizar publicacion','PRECONTRACTUAL','procesos.autorizar_transicion',false,'{}'),
+-    ('PARA_PUBLICAR','PUBLICADO','publicar','Publicar',NULL,'publicaciones.registrar',false,'{"requiere_responsable": "COMPRAS_ANALISTA", "requiere_publicacion": true}'),
++    ('PARA_PUBLICAR','PUBLICADO','publicar','Publicar',NULL,'publicaciones.registrar',false,'{"requiere_codigo": true, "requiere_responsable": "COMPRAS_ANALISTA", "requiere_publicacion": true}'),
+     ('PUBLICADO','PUBLICADO','republicar','Republicar',NULL,'publicaciones.registrar',false,'{"publicaciones_menor_a": "maximo_publicaciones", "ofertas_menor_a": "minimo_proformas"}'),
+     ('PUBLICADO','PARA_COMISION','enviar_a_comision','Enviar a comision',NULL,'procesos.autorizar_transicion',false,'{"ofertas_para_comision": true}'),
+     ('PUBLICADO','PARA_REAPERTURA','devolver_expediente','Devolver expediente',NULL,'procesos.devolver',true,'{"sin_ofertas_publicaciones_agotadas": true, "requiere_devolucion_registrada": true}'),
+@@ -1430,7 +1522,8 @@ SELECT o.id AS oferta_id, o.proceso_id, o.publicacion_id, o.proveedor_id,
+  GROUP BY o.id;
+ 
+ CREATE VIEW v_procesos AS
+-SELECT p.id AS proceso_id, p.codigo, p.anio, p.descripcion_producto, p.codigo_cpc, p.numero_pedido, p.ciclo,
++SELECT p.id AS proceso_id, p.codigo, EXTRACT(year FROM p.created_at AT TIME ZONE 'America/Guayaquil')::int AS anio_creacion,
++       p.descripcion_producto, p.codigo_cpc, p.ciclo,
+        tp.nombre AS tipo_proceso,
+        f.nombre  AS fase, em.codigo AS estado_macro_codigo, em.nombre AS estado_macro,
+        ep.codigo AS estado_codigo, ep.nombre AS estado_operativo,
+@@ -1480,7 +1573,7 @@ SELECT pr.id AS proveedor_id, pr.ruc, pr.razon_social,
+ 
+ -- Equivalente a la hoja del Excel: una fila por linea de producto
+ CREATE VIEW v_matriz_contratacion AS
+-SELECT p.id AS proceso_id, p.codigo, p.descripcion_producto, p.codigo_cpc, p.numero_pedido, p.ciclo,
++SELECT p.id AS proceso_id, p.codigo, p.descripcion_producto, p.codigo_cpc, p.ciclo,
+        pi.numero_linea, pi.cum, pi.detalle AS producto, pi.cantidad,
+        vp.estado_macro, vp.estado_operativo, vp.analista_responsable, vp.unidad_requirente,
+        ref.precio_referencial,
+diff --git a/database/sql/02_pruebas_esquema.sql b/database/sql/02_pruebas_esquema.sql
+index 2500a0b..90b6cf1 100644
+--- a/database/sql/02_pruebas_esquema.sql
++++ b/database/sql/02_pruebas_esquema.sql
+@@ -28,6 +28,7 @@ DECLARE
+     v_pub1 bigint; v_pub2 bigint; v_d bigint; v_arch bigint; v_ver bigint; v_rev bigint; v_obs bigint;
+     v_prov bigint[]; v_of bigint[]; v_oc bigint; v_ent bigint; i int;
+     f_prep bigint; f_pre bigint; f_con bigint;
++    v_cod text; v_cod2 text; v_cod3 text;
+     v_tp bigint; v_mac bigint; v_ini bigint; v_doc_tipo bigint; v_est_oferta bigint; v_td bigint;
+ BEGIN
+     SELECT id INTO f_prep FROM fases WHERE codigo='PREPARATORIA';
+@@ -50,8 +51,8 @@ BEGIN
+     SELECT id INTO v_ini FROM estados_proceso WHERE codigo='INICIO';
+ 
+     -- 1. Crear proceso: genera historial inicial
+-    INSERT INTO procesos (tipo_proceso_id, anio, descripcion_producto, estado_macro_id, estado_proceso_id, creado_por)
+-    VALUES (v_tp, 2026, 'Adquisicion de canulas', v_mac, v_ini, u_ur) RETURNING id INTO v_p;
++    INSERT INTO procesos (tipo_proceso_id, descripcion_producto, estado_macro_id, estado_proceso_id, creado_por)
++    VALUES (v_tp, 'Adquisicion de canulas', v_mac, v_ini, u_ur) RETURNING id INTO v_p;
+     PERFORM pg_temp.verifica((SELECT count(*) FROM historial_estados_proceso WHERE proceso_id=v_p)=1,
+         'crear proceso registra historial inicial');
+     INSERT INTO proceso_items (proceso_id,numero_linea,cum,detalle,cantidad) VALUES
+@@ -132,9 +133,50 @@ BEGIN
+     PERFORM pg_temp.verifica(true,'version actual de otro documento rechazada');
+ 
+     -- 6. Publicaciones y ofertas
++    -- 8b. Codigo del proceso: solo en estados permitidos, por quien tiene el permiso y esta asignado
++    PERFORM pg_temp.falla(format('SELECT asignar_codigo_proceso(%s,%s)',v_p,u_ca),'no se puede asignar el codigo');
+     PERFORM aplicar_transicion_proceso(v_p,'autorizar_publicacion',u_cj);
+     PERFORM pg_temp.verifica((SELECT em.codigo FROM procesos p JOIN estados_macro em ON em.id=p.estado_macro_id WHERE p.id=v_p)='PRECONTRACTUAL',
+         'autorizar_publicacion cambia el macro a PRECONTRACTUAL');
++    PERFORM pg_temp.falla(format('SELECT aplicar_transicion_proceso(%s,%L,%s)',v_p,'publicar',u_ca),'debe tener codigo');
++    PERFORM pg_temp.falla(format('SELECT asignar_codigo_proceso(%s,%s)',v_p,u_ur),'no tiene el permiso procesos.asignar_codigo');
++    PERFORM pg_temp.falla(format('SELECT asignar_codigo_proceso(%s,%s)',v_p,u_cj),'no tiene el permiso procesos.asignar_codigo');
++    PERFORM pg_temp.falla(format('UPDATE procesos SET codigo=%L WHERE id=%s','PE-AILEP-2026-777',v_p),'solo se asigna con asignar_codigo_proceso');
++    v_cod := asignar_codigo_proceso(v_p,u_ca);
++    PERFORM pg_temp.verifica(v_cod = 'PE-AILEP-' || to_char(now() AT TIME ZONE 'America/Guayaquil','YYYY') || '-001'
++        AND (SELECT codigo FROM procesos WHERE id=v_p)=v_cod,'el codigo se genera con prefijos, anio actual y 3 digitos');
++    PERFORM pg_temp.falla(format('SELECT asignar_codigo_proceso(%s,%s)',v_p,u_ca),'ya tiene codigo');
++    PERFORM pg_temp.falla(format('UPDATE procesos SET codigo=%L WHERE id=%s','OTRO',v_p),'no puede modificarse');
++    PERFORM pg_temp.verifica(EXISTS (SELECT 1 FROM auditoria WHERE evento='proceso.codigo_asignado' AND entidad_id=v_p),
++        'la asignacion del codigo queda en auditoria');
++
++    -- Segundo y tercer codigo: correlativo, parametros editables y sin truncar a 3 digitos
++    FOR i IN 1..2 LOOP
++        INSERT INTO procesos (tipo_proceso_id,descripcion_producto,estado_macro_id,estado_proceso_id,creado_por)
++            VALUES (v_tp,'Para codigo '||i,v_mac,v_ini,u_ur) RETURNING id INTO v_tmp;
++        PERFORM set_config('app.transicion_en_curso','procesos',true);
++        UPDATE procesos SET estado_macro_id=(SELECT id FROM estados_macro WHERE codigo='PRECONTRACTUAL'),
++               estado_proceso_id=(SELECT id FROM estados_proceso WHERE codigo='PARA_PUBLICAR') WHERE id=v_tmp;
++        PERFORM set_config('app.transicion_en_curso','',true);
++        INSERT INTO asignaciones_proceso (proceso_id,user_id,rol_id,fase_id,asignado_por)
++            VALUES (v_tmp,u_ca,(SELECT id FROM roles WHERE codigo='COMPRAS_ANALISTA'),f_pre,u_cj);
++        IF i = 1 THEN
++            v_cod2 := asignar_codigo_proceso(v_tmp,u_ca);
++            PERFORM pg_temp.verifica(right(v_cod2,4)='-002','el segundo codigo es correlativo (002)');
++            UPDATE secuencias_codigo_proceso SET ultimo = 999 WHERE tipo_proceso_id=v_tp;
++            UPDATE parametros SET valor='XYZ' WHERE clave='prefijo_institucion';
++        ELSE
++            v_cod3 := asignar_codigo_proceso(v_tmp,u_ca);
++            PERFORM pg_temp.verifica(v_cod3 LIKE 'PE-XYZ-%-1000','el prefijo es editable y 1000 no se trunca');
++        END IF;
++    END LOOP;
++    -- El contador es por anio: otro anio tiene su propia fila y no se ve afectado
++    INSERT INTO secuencias_codigo_proceso (tipo_proceso_id,anio,ultimo) VALUES (v_tp,2000,7);
++    PERFORM pg_temp.verifica((SELECT count(*) FROM secuencias_codigo_proceso WHERE tipo_proceso_id=v_tp)=2
++        AND (SELECT ultimo FROM secuencias_codigo_proceso WHERE tipo_proceso_id=v_tp AND anio=2000)=7,
++        'el contador se lleva por tipo de proceso y anio');
++    UPDATE parametros SET valor='AILEP' WHERE clave='prefijo_institucion';
++
+     PERFORM pg_temp.falla(format('SELECT aplicar_transicion_proceso(%s,%L,%s)',v_p,'publicar',u_ca),'No existe una publicacion');
+     INSERT INTO publicaciones (proceso_id,secuencia,codigo_nc,fecha_publicacion,fecha_limite)
+         VALUES (v_p,1,'NC-1798194964001-2026-00001',now(),now()+interval '2 days') RETURNING id INTO v_pub1;
+@@ -201,8 +243,8 @@ BEGIN
+         'historial del proceso con 15 movimientos');
+ 
+     -- 9. Devolucion y reapertura (el analista decide segun el memorando)
+-    INSERT INTO procesos (tipo_proceso_id,anio,descripcion_producto,estado_macro_id,estado_proceso_id,creado_por)
+-        VALUES (v_tp,2026,'Proceso devuelto',v_mac,v_ini,u_ur) RETURNING id INTO v_p2;
++    INSERT INTO procesos (tipo_proceso_id,descripcion_producto,estado_macro_id,estado_proceso_id,creado_por)
++        VALUES (v_tp,'Proceso devuelto',v_mac,v_ini,u_ur) RETURNING id INTO v_p2;
+     INSERT INTO asignaciones_proceso (proceso_id,user_id,rol_id,fase_id,asignado_por)
+         VALUES (v_p2,u_ca,(SELECT id FROM roles WHERE codigo='COMPRAS_ANALISTA'),f_pre,u_cj);
+     PERFORM set_config('app.transicion_en_curso','procesos',true);   -- solo para preparar el escenario
+@@ -224,8 +266,8 @@ BEGIN
+         'nuevo ciclo permite otra publicacion secuencia 1 con el mismo NC');
+ 
+     -- devolucion que no autoriza reapertura: solo se puede cerrar
+-    INSERT INTO procesos (tipo_proceso_id,anio,descripcion_producto,estado_macro_id,estado_proceso_id,creado_por)
+-        VALUES (v_tp,2026,'Sin reapertura',v_mac,v_ini,u_ur) RETURNING id INTO v_p3;
++    INSERT INTO procesos (tipo_proceso_id,descripcion_producto,estado_macro_id,estado_proceso_id,creado_por)
++        VALUES (v_tp,'Sin reapertura',v_mac,v_ini,u_ur) RETURNING id INTO v_p3;
+     INSERT INTO asignaciones_proceso (proceso_id,user_id,rol_id,fase_id,asignado_por)
+         VALUES (v_p3,u_ca,(SELECT id FROM roles WHERE codigo='COMPRAS_ANALISTA'),f_pre,u_cj);
+     PERFORM set_config('app.transicion_en_curso','procesos',true);
+@@ -238,8 +280,8 @@ BEGIN
+     PERFORM pg_temp.verifica(true,'devolucion sin reapertura solo permite cerrar');
+ 
+     -- 10. Documentos requeridos configurables por transicion
+-    INSERT INTO procesos (tipo_proceso_id,anio,descripcion_producto,estado_macro_id,estado_proceso_id,creado_por)
+-        VALUES (v_tp,2026,'Con requisitos',v_mac,v_ini,u_ur) RETURNING id INTO v_p3;
++    INSERT INTO procesos (tipo_proceso_id,descripcion_producto,estado_macro_id,estado_proceso_id,creado_por)
++        VALUES (v_tp,'Con requisitos',v_mac,v_ini,u_ur) RETURNING id INTO v_p3;
+     INSERT INTO asignaciones_proceso (proceso_id,user_id,rol_id,fase_id,asignado_por)
+         VALUES (v_p3,u_ur,(SELECT id FROM roles WHERE codigo='UNIDAD_REQUIRENTE'),f_prep,u_cj);
+     INSERT INTO transicion_proceso_requisitos (transicion_id,tipo_documento_id,estado_documento_minimo_id)
+diff --git a/docs/01_arquitectura_datos.md b/docs/01_arquitectura_datos.md
+index c1caf1b..428ef05 100644
+--- a/docs/01_arquitectura_datos.md
++++ b/docs/01_arquitectura_datos.md
+@@ -160,14 +160,14 @@ ### 3.2 Configuración de flujo
+ | `estados_oferta` | `id`, `codigo` U, `nombre`, `orden`, `es_inicial`, `es_final`, `activo` | |
+ | `transiciones_oferta` | misma estructura | |
+ | `historial_estados_oferta` | `id`, *oferta_id*, *transicion_id*, origen, destino, *user_id*, `comentario` N, `created_at` | Append-only. |
+-| `tipos_proceso` | `id`, `codigo` U, `nombre`, `activo` | Bizagi: "Seleccionar el tipo de proceso (Abastecimiento Centralizado)". |
++| `tipos_proceso` | `id`, `codigo` U, `nombre`, `prefijo`, `activo` | Bizagi: "Seleccionar el tipo de proceso (Abastecimiento Centralizado)". |
+ | `tipos_designacion` | `id`, `codigo` U, `nombre`, `monto_minimo` numeric N, `orden`, `activo` | Reemplaza el `IF` del Excel (col. AD). Umbrales editables. |
+ 
+ ### 3.3 Procesos y asignaciones
+ 
+ | Tabla | Columnas | Notas |
+ |---|---|---|
+-| `procesos` | `id`, `codigo` U, *tipo_proceso_id*, `anio` smallint, `descripcion_producto`, `codigo_cpc` N, `numero_pedido` smallint default 1, *proceso_origen_id* N, *estado_macro_id*, *estado_proceso_id*, `observacion` N, *creado_por* (user_id), `deleted_at` N | `proceso_origen_id`: reproceso/reapertura (006 → 070). |
++| `procesos` | `id`, `codigo` U, *tipo_proceso_id*, `descripcion_producto`, `codigo_cpc` N, *estado_macro_id*, *estado_proceso_id*, `observacion` N, *creado_por* (user_id), `deleted_at` N | `proceso_origen_id`: reproceso/reapertura (006 → 070). |
+ | `proceso_items` | `id`, *proceso_id*, `numero_linea`, `cum`, `descripcion`, `cantidad` bigint | U(`proceso_id`,`numero_linea`). Líneas de producto. |
+ | `precios_referenciales` | `id`, *proceso_item_id*, *proveedor_id* N, `fuente`, `precio_unitario` | Excel "PRECIOS MSP" (K, L). `fuente` por confirmar. |
+ | `asignaciones_proceso` | `id`, *proceso_id*, *user_id*, *rol_id*, *fase_id*, *etapa_id* N, *actividad_id* N, *asignado_por*, `fecha_inicio`, `fecha_fin` N, `activo` | Quién interviene en cada fase/etapa del proceso. Base del control "por responsable". |
+@@ -220,7 +220,7 @@ ## 4. Cobertura del Excel (56 columnas)
+ | G | `proceso_items.cantidad` |
+ | H | `estados_proceso` (mapeo en §5) |
+ | I | `asignaciones_proceso` (rol analista responsable) |
+-| J | `procesos.numero_pedido` |
++| J | Descartada (el N.º de pedido no se necesita) |
+ | K, L | `precios_referenciales` |
+ | M–Z | `ofertas`, `oferta_items`, `proveedores`, `proveedor_alias` |
+ | O, P, S, T, W, X, AA, AB | Calculados en vistas (no se almacenan) |
+@@ -432,3 +432,22 @@ ## 12. Visibilidad de procesos (Entrega D1)
+ 
+ Al crear un proceso, quien lo crea queda asignado como `UNIDAD_REQUIRENTE` en la fase Preparatoria; así puede ejercer permisos que exigen asignación (p. ej. enviar a revisión).
+ Los datos del proceso solo se editan en los estados `INICIO` y `EN_CORRECCION` (supuesto, constante `Proceso::ESTADOS_EDITABLES`).
++
++
++---
++
++## 13. Código del proceso (Entrega D, correcciones)
++
++Formato: `<prefijo del tipo>-<prefijo institucional>-<año>-<número>`, p. ej. `PE-AILEP-2026-001`.
++
++| Pieza | Dónde se configura |
++|---|---|
++| `PE` | `tipos_proceso.prefijo` (uno por tipo de proceso) |
++| `AILEP` | `parametros.prefijo_institucion` |
++| Año | El del momento de generar el código, en la zona horaria `parametros.zona_horaria` (`America/Guayaquil`) |
++| Número | Contador en `secuencias_codigo_proceso` por tipo de proceso y año; reinicia en 001 cada año. Dígitos: `parametros.digitos_codigo_proceso` (3) |
++
++- Lo genera el analista de Compras asignado con la función `asignar_codigo_proceso(proceso_id, user_id)` (permiso `procesos.asignar_codigo`, exige asignación), solo en estados con `estados_proceso.permite_asignar_codigo` (hoy `PARA_PUBLICAR`: documentos aprobados y legalizados, publicación solicitada).
++- La transición `publicar` exige que el proceso ya tenga código (regla `requiere_codigo`).
++- El código no se puede escribir ni cambiar a mano (trigger); al reabrir el proceso se conserva. La asignación queda en `auditoria`.
++- Se eliminan `procesos.anio` y `procesos.numero_pedido`. Las vistas calculan `anio_creacion` desde `created_at`.
+diff --git a/tests/Feature/CatalogoSeguridadTest.php b/tests/Feature/CatalogoSeguridadTest.php
+index 7850e04..3462f7e 100644
+--- a/tests/Feature/CatalogoSeguridadTest.php
++++ b/tests/Feature/CatalogoSeguridadTest.php
+@@ -48,4 +48,23 @@ public function test_solo_el_administrador_ve_modulos_de_administracion(): void
+ 
+         $this->assertSame(['ADMIN'], $roles);
+     }
++
++    public function test_el_codigo_del_proceso_lo_genera_solo_el_analista_de_compras(): void
++    {
++        $roles = DB::table('rol_permiso as rp')
++            ->join('roles as r', 'r.id', '=', 'rp.rol_id')
++            ->join('permisos as p', 'p.id', '=', 'rp.permiso_id')
++            ->where('p.codigo', 'procesos.asignar_codigo')
++            ->pluck('r.codigo')
++            ->all();
++
++        $this->assertSame(['COMPRAS_ANALISTA'], $roles);
++    }
++
++    public function test_parametros_del_codigo_de_proceso(): void
++    {
++        $this->assertSame('AILEP', DB::table('parametros')->where('clave', 'prefijo_institucion')->value('valor'));
++        $this->assertSame('PE', DB::table('tipos_proceso')->where('codigo', 'ABASTECIMIENTO_CENTRALIZADO')->value('prefijo'));
++        $this->assertTrue((bool) DB::table('estados_proceso')->where('codigo', 'PARA_PUBLICAR')->value('permite_asignar_codigo'));
++    }
+ }
+diff --git a/tests/Feature/ProcesosTest.php b/tests/Feature/ProcesosTest.php
+index 63025da..beb13b3 100644
+--- a/tests/Feature/ProcesosTest.php
++++ b/tests/Feature/ProcesosTest.php
+@@ -22,7 +22,7 @@ class ProcesosTest extends TestCase
+ 
+     private function proceso(User $creador, string $descripcion = 'Medicamentos de prueba'): Proceso
+     {
+-        $p = new Proceso(['tipo_proceso_id' => TipoProceso::value('id'), 'anio' => 2026, 'descripcion_producto' => $descripcion]);
++        $p = new Proceso(['tipo_proceso_id' => TipoProceso::value('id'), 'descripcion_producto' => $descripcion]);
+         $p->forceFill([
+             'creado_por' => $creador->id,
+             'estado_macro_id' => EstadoMacro::where('codigo', 'PREPARATORIA')->value('id'),
+@@ -51,9 +51,7 @@ public function test_la_unidad_requirente_crea_un_proceso_con_items(): void
+         Livewire::test(CreateProceso::class)
+             ->fillForm([
+                 'tipo_proceso_id' => TipoProceso::value('id'),
+-                'anio' => 2026,
+                 'descripcion_producto' => 'Adquisicion de medicamentos',
+-                'numero_pedido' => 1,
+                 'items' => [['cum' => '12345-1', 'cantidad' => 10, 'detalle' => 'Paracetamol 500 mg']],
+             ])
+             ->call('create')
+@@ -116,9 +114,7 @@ public function test_la_edicion_se_bloquea_al_enviar_a_revision(): void
+         Livewire::test(CreateProceso::class)
+             ->fillForm([
+                 'tipo_proceso_id' => TipoProceso::value('id'),
+-                'anio' => 2026,
+                 'descripcion_producto' => 'Proceso a enviar',
+-                'numero_pedido' => 1,
+                 'items' => [['cum' => '1', 'cantidad' => 1, 'detalle' => 'x']],
+             ])
+             ->call('create');
+-- 
+2.43.0
+
