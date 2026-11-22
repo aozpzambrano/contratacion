@@ -19,7 +19,6 @@ class ProcesosTable
                 TextColumn::make('id')->label('N.º')->sortable(),
                 TextColumn::make('codigo')->label('Código')->searchable()->placeholder('Sin asignar'),
                 TextColumn::make('descripcion_producto')->label('Descripción del producto')->limit(60)->searchable()->wrap(),
-                TextColumn::make('anio')->label('Año')->sortable(),
                 TextColumn::make('estadoMacro.nombre')->label('Fase')->badge(),
                 TextColumn::make('estadoProceso.nombre')->label('Estado')->badge(),
                 TextColumn::make('ciclo')->label('Ciclo')->toggleable(),
@@ -32,8 +31,6 @@ class ProcesosTable
                     ->options(fn () => EstadoMacro::orderBy('orden')->pluck('nombre', 'id')->all()),
                 SelectFilter::make('estado_proceso_id')->label('Estado')
                     ->options(fn () => EstadoProceso::orderBy('orden')->pluck('nombre', 'id')->all()),
-                SelectFilter::make('anio')->label('Año')
-                    ->options(fn () => \App\Models\Proceso::query()->distinct()->orderByDesc('anio')->pluck('anio', 'anio')->all()),
             ])
             ->recordActions([
                 ViewAction::make(),

@@ -28,6 +28,7 @@ DECLARE
     v_pub1 bigint; v_pub2 bigint; v_d bigint; v_arch bigint; v_ver bigint; v_rev bigint; v_obs bigint;
     v_prov bigint[]; v_of bigint[]; v_oc bigint; v_ent bigint; i int;
     f_prep bigint; f_pre bigint; f_con bigint;
+    v_cod text; v_cod2 text; v_cod3 text;
     v_tp bigint; v_mac bigint; v_ini bigint; v_doc_tipo bigint; v_est_oferta bigint; v_td bigint;
 BEGIN
     SELECT id INTO f_prep FROM fases WHERE codigo='PREPARATORIA';
@@ -50,8 +51,8 @@ BEGIN
     SELECT id INTO v_ini FROM estados_proceso WHERE codigo='INICIO';
 
     -- 1. Crear proceso: genera historial inicial
-    INSERT INTO procesos (tipo_proceso_id, anio, descripcion_producto, estado_macro_id, estado_proceso_id, creado_por)
-    VALUES (v_tp, 2026, 'Adquisicion de canulas', v_mac, v_ini, u_ur) RETURNING id INTO v_p;
+    INSERT INTO procesos (tipo_proceso_id, descripcion_producto, estado_macro_id, estado_proceso_id, creado_por)
+    VALUES (v_tp, 'Adquisicion de canulas', v_mac, v_ini, u_ur) RETURNING id INTO v_p;
     PERFORM pg_temp.verifica((SELECT count(*) FROM historial_estados_proceso WHERE proceso_id=v_p)=1,
         'crear proceso registra historial inicial');
     INSERT INTO proceso_items (proceso_id,numero_linea,cum,detalle,cantidad) VALUES
@@ -132,9 +133,50 @@ BEGIN
     PERFORM pg_temp.verifica(true,'version actual de otro documento rechazada');
 
     -- 6. Publicaciones y ofertas
+    -- 8b. Codigo del proceso: solo en estados permitidos, por quien tiene el permiso y esta asignado
+    PERFORM pg_temp.falla(format('SELECT asignar_codigo_proceso(%s,%s)',v_p,u_ca),'no se puede asignar el codigo');
     PERFORM aplicar_transicion_proceso(v_p,'autorizar_publicacion',u_cj);
     PERFORM pg_temp.verifica((SELECT em.codigo FROM procesos p JOIN estados_macro em ON em.id=p.estado_macro_id WHERE p.id=v_p)='PRECONTRACTUAL',
         'autorizar_publicacion cambia el macro a PRECONTRACTUAL');
+    PERFORM pg_temp.falla(format('SELECT aplicar_transicion_proceso(%s,%L,%s)',v_p,'publicar',u_ca),'debe tener codigo');
+    PERFORM pg_temp.falla(format('SELECT asignar_codigo_proceso(%s,%s)',v_p,u_ur),'no tiene el permiso procesos.asignar_codigo');
+    PERFORM pg_temp.falla(format('SELECT asignar_codigo_proceso(%s,%s)',v_p,u_cj),'no tiene el permiso procesos.asignar_codigo');
+    PERFORM pg_temp.falla(format('UPDATE procesos SET codigo=%L WHERE id=%s','PE-AILEP-2026-777',v_p),'solo se asigna con asignar_codigo_proceso');
+    v_cod := asignar_codigo_proceso(v_p,u_ca);
+    PERFORM pg_temp.verifica(v_cod = 'PE-AILEP-' || to_char(now() AT TIME ZONE 'America/Guayaquil','YYYY') || '-001'
+        AND (SELECT codigo FROM procesos WHERE id=v_p)=v_cod,'el codigo se genera con prefijos, anio actual y 3 digitos');
+    PERFORM pg_temp.falla(format('SELECT asignar_codigo_proceso(%s,%s)',v_p,u_ca),'ya tiene codigo');
+    PERFORM pg_temp.falla(format('UPDATE procesos SET codigo=%L WHERE id=%s','OTRO',v_p),'no puede modificarse');
+    PERFORM pg_temp.verifica(EXISTS (SELECT 1 FROM auditoria WHERE evento='proceso.codigo_asignado' AND entidad_id=v_p),
+        'la asignacion del codigo queda en auditoria');
+
+    -- Segundo y tercer codigo: correlativo, parametros editables y sin truncar a 3 digitos
+    FOR i IN 1..2 LOOP
+        INSERT INTO procesos (tipo_proceso_id,descripcion_producto,estado_macro_id,estado_proceso_id,creado_por)
+            VALUES (v_tp,'Para codigo '||i,v_mac,v_ini,u_ur) RETURNING id INTO v_tmp;
+        PERFORM set_config('app.transicion_en_curso','procesos',true);
+        UPDATE procesos SET estado_macro_id=(SELECT id FROM estados_macro WHERE codigo='PRECONTRACTUAL'),
+               estado_proceso_id=(SELECT id FROM estados_proceso WHERE codigo='PARA_PUBLICAR') WHERE id=v_tmp;
+        PERFORM set_config('app.transicion_en_curso','',true);
+        INSERT INTO asignaciones_proceso (proceso_id,user_id,rol_id,fase_id,asignado_por)
+            VALUES (v_tmp,u_ca,(SELECT id FROM roles WHERE codigo='COMPRAS_ANALISTA'),f_pre,u_cj);
+        IF i = 1 THEN
+            v_cod2 := asignar_codigo_proceso(v_tmp,u_ca);
+            PERFORM pg_temp.verifica(right(v_cod2,4)='-002','el segundo codigo es correlativo (002)');
+            UPDATE secuencias_codigo_proceso SET ultimo = 999 WHERE tipo_proceso_id=v_tp;
+            UPDATE parametros SET valor='XYZ' WHERE clave='prefijo_institucion';
+        ELSE
+            v_cod3 := asignar_codigo_proceso(v_tmp,u_ca);
+            PERFORM pg_temp.verifica(v_cod3 LIKE 'PE-XYZ-%-1000','el prefijo es editable y 1000 no se trunca');
+        END IF;
+    END LOOP;
+    -- El contador es por anio: otro anio tiene su propia fila y no se ve afectado
+    INSERT INTO secuencias_codigo_proceso (tipo_proceso_id,anio,ultimo) VALUES (v_tp,2000,7);
+    PERFORM pg_temp.verifica((SELECT count(*) FROM secuencias_codigo_proceso WHERE tipo_proceso_id=v_tp)=2
+        AND (SELECT ultimo FROM secuencias_codigo_proceso WHERE tipo_proceso_id=v_tp AND anio=2000)=7,
+        'el contador se lleva por tipo de proceso y anio');
+    UPDATE parametros SET valor='AILEP' WHERE clave='prefijo_institucion';
+
     PERFORM pg_temp.falla(format('SELECT aplicar_transicion_proceso(%s,%L,%s)',v_p,'publicar',u_ca),'No existe una publicacion');
     INSERT INTO publicaciones (proceso_id,secuencia,codigo_nc,fecha_publicacion,fecha_limite)
         VALUES (v_p,1,'NC-1798194964001-2026-00001',now(),now()+interval '2 days') RETURNING id INTO v_pub1;
@@ -201,8 +243,8 @@ BEGIN
         'historial del proceso con 15 movimientos');
 
     -- 9. Devolucion y reapertura (el analista decide segun el memorando)
-    INSERT INTO procesos (tipo_proceso_id,anio,descripcion_producto,estado_macro_id,estado_proceso_id,creado_por)
-        VALUES (v_tp,2026,'Proceso devuelto',v_mac,v_ini,u_ur) RETURNING id INTO v_p2;
+    INSERT INTO procesos (tipo_proceso_id,descripcion_producto,estado_macro_id,estado_proceso_id,creado_por)
+        VALUES (v_tp,'Proceso devuelto',v_mac,v_ini,u_ur) RETURNING id INTO v_p2;
     INSERT INTO asignaciones_proceso (proceso_id,user_id,rol_id,fase_id,asignado_por)
         VALUES (v_p2,u_ca,(SELECT id FROM roles WHERE codigo='COMPRAS_ANALISTA'),f_pre,u_cj);
     PERFORM set_config('app.transicion_en_curso','procesos',true);   -- solo para preparar el escenario
@@ -224,8 +266,8 @@ BEGIN
         'nuevo ciclo permite otra publicacion secuencia 1 con el mismo NC');
 
     -- devolucion que no autoriza reapertura: solo se puede cerrar
-    INSERT INTO procesos (tipo_proceso_id,anio,descripcion_producto,estado_macro_id,estado_proceso_id,creado_por)
-        VALUES (v_tp,2026,'Sin reapertura',v_mac,v_ini,u_ur) RETURNING id INTO v_p3;
+    INSERT INTO procesos (tipo_proceso_id,descripcion_producto,estado_macro_id,estado_proceso_id,creado_por)
+        VALUES (v_tp,'Sin reapertura',v_mac,v_ini,u_ur) RETURNING id INTO v_p3;
     INSERT INTO asignaciones_proceso (proceso_id,user_id,rol_id,fase_id,asignado_por)
         VALUES (v_p3,u_ca,(SELECT id FROM roles WHERE codigo='COMPRAS_ANALISTA'),f_pre,u_cj);
     PERFORM set_config('app.transicion_en_curso','procesos',true);
@@ -238,8 +280,8 @@ BEGIN
     PERFORM pg_temp.verifica(true,'devolucion sin reapertura solo permite cerrar');
 
     -- 10. Documentos requeridos configurables por transicion
-    INSERT INTO procesos (tipo_proceso_id,anio,descripcion_producto,estado_macro_id,estado_proceso_id,creado_por)
-        VALUES (v_tp,2026,'Con requisitos',v_mac,v_ini,u_ur) RETURNING id INTO v_p3;
+    INSERT INTO procesos (tipo_proceso_id,descripcion_producto,estado_macro_id,estado_proceso_id,creado_por)
+        VALUES (v_tp,'Con requisitos',v_mac,v_ini,u_ur) RETURNING id INTO v_p3;
     INSERT INTO asignaciones_proceso (proceso_id,user_id,rol_id,fase_id,asignado_por)
         VALUES (v_p3,u_ur,(SELECT id FROM roles WHERE codigo='UNIDAD_REQUIRENTE'),f_prep,u_cj);
     INSERT INTO transicion_proceso_requisitos (transicion_id,tipo_documento_id,estado_documento_minimo_id)

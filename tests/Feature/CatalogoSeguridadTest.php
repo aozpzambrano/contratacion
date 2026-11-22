@@ -48,4 +48,23 @@ class CatalogoSeguridadTest extends TestCase
 
         $this->assertSame(['ADMIN'], $roles);
     }
+
+    public function test_el_codigo_del_proceso_lo_genera_solo_el_analista_de_compras(): void
+    {
+        $roles = DB::table('rol_permiso as rp')
+            ->join('roles as r', 'r.id', '=', 'rp.rol_id')
+            ->join('permisos as p', 'p.id', '=', 'rp.permiso_id')
+            ->where('p.codigo', 'procesos.asignar_codigo')
+            ->pluck('r.codigo')
+            ->all();
+
+        $this->assertSame(['COMPRAS_ANALISTA'], $roles);
+    }
+
+    public function test_parametros_del_codigo_de_proceso(): void
+    {
+        $this->assertSame('AILEP', DB::table('parametros')->where('clave', 'prefijo_institucion')->value('valor'));
+        $this->assertSame('PE', DB::table('tipos_proceso')->where('codigo', 'ABASTECIMIENTO_CENTRALIZADO')->value('prefijo'));
+        $this->assertTrue((bool) DB::table('estados_proceso')->where('codigo', 'PARA_PUBLICAR')->value('permite_asignar_codigo'));
+    }
 }

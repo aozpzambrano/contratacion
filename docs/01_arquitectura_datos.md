@@ -160,14 +160,14 @@ Notación: **PK**, *FK*, `U` único, `N` nullable. Se omiten `created_at`/`updat
 | `estados_oferta` | `id`, `codigo` U, `nombre`, `orden`, `es_inicial`, `es_final`, `activo` | |
 | `transiciones_oferta` | misma estructura | |
 | `historial_estados_oferta` | `id`, *oferta_id*, *transicion_id*, origen, destino, *user_id*, `comentario` N, `created_at` | Append-only. |
-| `tipos_proceso` | `id`, `codigo` U, `nombre`, `activo` | Bizagi: "Seleccionar el tipo de proceso (Abastecimiento Centralizado)". |
+| `tipos_proceso` | `id`, `codigo` U, `nombre`, `prefijo`, `activo` | Bizagi: "Seleccionar el tipo de proceso (Abastecimiento Centralizado)". |
 | `tipos_designacion` | `id`, `codigo` U, `nombre`, `monto_minimo` numeric N, `orden`, `activo` | Reemplaza el `IF` del Excel (col. AD). Umbrales editables. |
 
 ### 3.3 Procesos y asignaciones
 
 | Tabla | Columnas | Notas |
 |---|---|---|
-| `procesos` | `id`, `codigo` U, *tipo_proceso_id*, `anio` smallint, `descripcion_producto`, `codigo_cpc` N, `numero_pedido` smallint default 1, *proceso_origen_id* N, *estado_macro_id*, *estado_proceso_id*, `observacion` N, *creado_por* (user_id), `deleted_at` N | `proceso_origen_id`: reproceso/reapertura (006 → 070). |
+| `procesos` | `id`, `codigo` U, *tipo_proceso_id*, `descripcion_producto`, `codigo_cpc` N, *estado_macro_id*, *estado_proceso_id*, `observacion` N, *creado_por* (user_id), `deleted_at` N | `proceso_origen_id`: reproceso/reapertura (006 → 070). |
 | `proceso_items` | `id`, *proceso_id*, `numero_linea`, `cum`, `descripcion`, `cantidad` bigint | U(`proceso_id`,`numero_linea`). Líneas de producto. |
 | `precios_referenciales` | `id`, *proceso_item_id*, *proveedor_id* N, `fuente`, `precio_unitario` | Excel "PRECIOS MSP" (K, L). `fuente` por confirmar. |
 | `asignaciones_proceso` | `id`, *proceso_id*, *user_id*, *rol_id*, *fase_id*, *etapa_id* N, *actividad_id* N, *asignado_por*, `fecha_inicio`, `fecha_fin` N, `activo` | Quién interviene en cada fase/etapa del proceso. Base del control "por responsable". |
@@ -220,7 +220,7 @@ Notación: **PK**, *FK*, `U` único, `N` nullable. Se omiten `created_at`/`updat
 | G | `proceso_items.cantidad` |
 | H | `estados_proceso` (mapeo en §5) |
 | I | `asignaciones_proceso` (rol analista responsable) |
-| J | `procesos.numero_pedido` |
+| J | Descartada (el N.º de pedido no se necesita) |
 | K, L | `precios_referenciales` |
 | M–Z | `ofertas`, `oferta_items`, `proveedores`, `proveedor_alias` |
 | O, P, S, T, W, X, AA, AB | Calculados en vistas (no se almacenan) |
@@ -432,3 +432,22 @@ Capa 3 de autorización (asignación al registro), implementada en `Proceso::sco
 
 Al crear un proceso, quien lo crea queda asignado como `UNIDAD_REQUIRENTE` en la fase Preparatoria; así puede ejercer permisos que exigen asignación (p. ej. enviar a revisión).
 Los datos del proceso solo se editan en los estados `INICIO` y `EN_CORRECCION` (supuesto, constante `Proceso::ESTADOS_EDITABLES`).
+
+
+---
+
+## 13. Código del proceso (Entrega D, correcciones)
+
+Formato: `<prefijo del tipo>-<prefijo institucional>-<año>-<número>`, p. ej. `PE-AILEP-2026-001`.
+
+| Pieza | Dónde se configura |
+|---|---|
+| `PE` | `tipos_proceso.prefijo` (uno por tipo de proceso) |
+| `AILEP` | `parametros.prefijo_institucion` |
+| Año | El del momento de generar el código, en la zona horaria `parametros.zona_horaria` (`America/Guayaquil`) |
+| Número | Contador en `secuencias_codigo_proceso` por tipo de proceso y año; reinicia en 001 cada año. Dígitos: `parametros.digitos_codigo_proceso` (3) |
+
+- Lo genera el analista de Compras asignado con la función `asignar_codigo_proceso(proceso_id, user_id)` (permiso `procesos.asignar_codigo`, exige asignación), solo en estados con `estados_proceso.permite_asignar_codigo` (hoy `PARA_PUBLICAR`: documentos aprobados y legalizados, publicación solicitada).
+- La transición `publicar` exige que el proceso ya tenga código (regla `requiere_codigo`).
+- El código no se puede escribir ni cambiar a mano (trigger); al reabrir el proceso se conserva. La asignación queda en `auditoria`.
+- Se eliminan `procesos.anio` y `procesos.numero_pedido`. Las vistas calculan `anio_creacion` desde `created_at`.

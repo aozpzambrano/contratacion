@@ -22,13 +22,6 @@ class ProcesoForm
                         ->relationship('tipoProceso', 'nombre', fn ($query) => $query->where('activo', true))
                         ->default(fn () => \App\Models\TipoProceso::where('activo', true)->orderBy('id')->value('id'))
                         ->required(),
-                    TextInput::make('anio')
-                        ->label('Año')
-                        ->numeric()
-                        ->minValue(2000)
-                        ->maxValue(2100)
-                        ->default(now()->year)
-                        ->required(),
                     Textarea::make('descripcion_producto')
                         ->label('Descripción del producto')
                         ->required()
@@ -36,12 +29,6 @@ class ProcesoForm
                     TextInput::make('codigo_cpc')
                         ->label('Código CPC')
                         ->maxLength(20),
-                    TextInput::make('numero_pedido')
-                        ->label('N.º de pedido')
-                        ->numeric()
-                        ->minValue(1)
-                        ->default(1)
-                        ->required(),
                     Textarea::make('observacion')
                         ->label('Observación')
                         ->columnSpanFull(),
