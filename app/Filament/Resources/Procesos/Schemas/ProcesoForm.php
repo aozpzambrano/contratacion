@@ -19,7 +19,7 @@ class ProcesoForm
                 ->schema([
                     Select::make('tipo_proceso_id')
                         ->label('Tipo de proceso')
-                        ->relationship('tipoProceso', 'nombre', fn ($q) => $q->where('activo', true))
+                        ->relationship('tipoProceso', 'nombre', fn ($query) => $query->where('activo', true))
                         ->default(fn () => \App\Models\TipoProceso::where('activo', true)->orderBy('id')->value('id'))
                         ->required(),
                     TextInput::make('anio')

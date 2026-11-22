@@ -9,7 +9,7 @@ return new class extends Migration
      * El script SQL trae su propio BEGIN/COMMIT, por eso esta migracion
      * no se envuelve en la transaccion de Laravel.
      */
-    public bool $withinTransaction = false;
+    public $withinTransaction = false;
 
     /** Tablas del framework que down() no debe tocar. */
     private array $conservar = [

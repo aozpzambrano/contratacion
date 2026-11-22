@@ -7,21 +7,29 @@ use App\Models\AsignacionProceso;
 use App\Models\EstadoMacro;
 use App\Models\EstadoProceso;
 use App\Models\Fase;
+use App\Models\Proceso;
 use App\Models\Rol;
 use Filament\Resources\Pages\CreateRecord;
+use Illuminate\Database\Eloquent\Model;
 
 class CreateProceso extends CreateRecord
 {
     protected static string $resource = ProcesoResource::class;
 
-    /** El proceso nace en la fase y estado iniciales del catalogo; un trigger registra el primer historial. */
-    protected function mutateFormDataBeforeCreate(array $data): array
+    /**
+     * El proceso nace en la fase y estado iniciales del catalogo; un trigger registra el primer historial.
+     * Los estados y creado_por no son asignables en masa, por eso se fijan de forma explicita.
+     */
+    protected function handleRecordCreation(array $data): Model
     {
-        $data['creado_por'] = auth()->id();
-        $data['estado_macro_id'] = EstadoMacro::where('codigo', 'PREPARATORIA')->value('id');
-        $data['estado_proceso_id'] = EstadoProceso::where('es_inicial', true)->where('activo', true)->value('id');
+        $proceso = new Proceso($data);
+        $proceso->forceFill([
+            'creado_por' => auth()->id(),
+            'estado_macro_id' => EstadoMacro::where('codigo', 'PREPARATORIA')->value('id'),
+            'estado_proceso_id' => EstadoProceso::where('es_inicial', true)->where('activo', true)->value('id'),
+        ])->save();
 
-        return $data;
+        return $proceso;
     }
 
     /** Quien crea el proceso queda asignado como unidad requirente (permite enviar a revision). */
