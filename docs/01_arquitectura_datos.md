@@ -459,3 +459,17 @@ Formato: `<prefijo del tipo>-<prefijo institucional>-<año>-<número>`, p. ej. `
 - **Enviar a revisión** (`enviar_a_revision` y `reenviar_a_revision`) exige dos documentos con al menos una versión cargada (archivo): **Informe de necesidad** y **Especificaciones técnicas**. Son documentos distintos y siguen el mismo flujo: revisión, aprobación y legalización. La legalización consiste en subir el PDF con firma electrónica. Los requisitos están en `transicion_proceso_requisitos` y se editan como dato. Los demás documentos del gráfico de Bizagi se incorporarán al avanzar en los flujos.
 - **Publicaciones:** no hay límite por ciclo (se elimina el parámetro `maximo_publicaciones`). Un proceso se republica mientras las ofertas sean menos que `minimo_proformas`.
 - **Pendiente (se retomará antes de la fase contractual):** si el proceso solo puede reabrirse dentro del año en curso y pasar a "Finalizado" al cambiar el año.
+
+---
+
+## 15. Acciones sobre el proceso (Entrega D2)
+
+En el detalle del proceso (`/admin/procesos/{id}`) el usuario ve solo los botones que le corresponden:
+
+| Botón | Quién lo ve | Regla |
+|---|---|---|
+| Transiciones del flujo (Enviar a revisión, Solicitar correcciones, Validar documentación, Autorizar publicación…) | Quien tiene el permiso de la transición, opera en la fase actual con su rol y, si el permiso lo exige, está asignado al proceso | Se ejecuta con `aplicar_transicion_proceso()`. Si la transición exige comentario, el formulario lo pide. Los errores de la base (documentos faltantes, observaciones pendientes, etc.) se muestran tal cual. |
+| Generar código del proceso | Analista asignado, con `procesos.asignar_codigo` | Solo si el proceso no tiene código y está en un estado con `permite_asignar_codigo`. |
+| Asignar analista | Jefe de Compras (`procesos.asignar_responsables`) | Elige un analista activo; por defecto reemplaza al analista actual (puede sumar otro). Queda en `auditoria` (`proceso.analista_asignado`). |
+
+La lógica está en `App\Services\ServicioProceso`; las pantallas solo la invocan. Las transiciones que dependen de módulos aún no construidos (publicaciones, ofertas, designaciones, órdenes de compra) aparecen con su permiso, pero la base responde con el requisito que falta hasta que existan esos módulos.
