@@ -10,7 +10,6 @@ use Filament\Actions\Action;
 use Filament\Actions\EditAction;
 use Filament\Forms\Components\Select;
 use Filament\Forms\Components\Textarea;
-use Filament\Forms\Components\Toggle;
 use Filament\Notifications\Notification;
 use Filament\Resources\Pages\ViewRecord;
 
@@ -66,14 +65,10 @@ class ViewProceso extends ViewRecord
                         ->options(fn () => $servicio->analistasDisponibles())
                         ->searchable()
                         ->required(),
-                    Toggle::make('reemplazar')
-                        ->label('Reemplazar al analista actual')
-                        ->helperText('Desactívelo para sumar un analista sin quitar al actual.')
-                        ->default(true),
                 ])
                 ->action(function (array $data) use ($servicio, $proceso, $usuario) {
                     $this->ejecutar(fn () => $servicio->asignarAnalista(
-                        $proceso, User::findOrFail($data['analista_id']), $usuario, (bool) $data['reemplazar']
+                        $proceso, User::findOrFail($data['analista_id']), $usuario
                     ), 'Analista asignado');
                 });
         }

@@ -103,9 +103,9 @@ class ServicioProceso
 
     /**
      * El jefe de Compras asigna al analista que revisa y sigue el proceso.
-     * Con $reemplazar se cierran las asignaciones vigentes de analista (p. ej. otra persona para publicar).
+     * Hay un unico analista responsable por proceso: asignar a otro cierra la asignacion vigente.
      */
-    public function asignarAnalista(Proceso $proceso, User $analista, User $jefe, bool $reemplazar = true): void
+    public function asignarAnalista(Proceso $proceso, User $analista, User $jefe): void
     {
         if (! $jefe->tienePermiso('procesos.asignar_responsables')) {
             throw new DomainException('No tiene permiso para asignar responsables.');
@@ -120,17 +120,15 @@ class ServicioProceso
         $rolId = Rol::where('codigo', 'COMPRAS_ANALISTA')->value('id');
         $faseId = $proceso->estadoMacro?->fase_id ?? Fase::where('codigo', 'PREPARATORIA')->value('id');
 
-        DB::transaction(function () use ($proceso, $analista, $jefe, $reemplazar, $rolId, $faseId) {
-            if ($reemplazar) {
-                $proceso->asignaciones()
-                    ->where('rol_id', $rolId)->where('activo', true)->where('user_id', '!=', $analista->id)
-                    ->update([
-                        'activo' => false,
-                        // hora de la base y nunca anterior al inicio (restriccion fecha_fin >= fecha_inicio)
-                        'fecha_fin' => DB::raw('GREATEST(now(), fecha_inicio)'),
-                        'updated_at' => DB::raw('now()'),
-                    ]);
-            }
+        DB::transaction(function () use ($proceso, $analista, $jefe, $rolId, $faseId) {
+            $proceso->asignaciones()
+                ->where('rol_id', $rolId)->where('activo', true)->where('user_id', '!=', $analista->id)
+                ->update([
+                    'activo' => false,
+                    // hora de la base y nunca anterior al inicio (restriccion fecha_fin >= fecha_inicio)
+                    'fecha_fin' => DB::raw('GREATEST(now(), fecha_inicio)'),
+                    'updated_at' => DB::raw('now()'),
+                ]);
 
             $yaAsignado = $proceso->asignaciones()
                 ->where('rol_id', $rolId)->where('user_id', $analista->id)->where('activo', true)->exists();
@@ -150,7 +148,7 @@ class ServicioProceso
                 'evento' => 'proceso.analista_asignado',
                 'entidad' => 'procesos',
                 'entidad_id' => $proceso->id,
-                'valores_nuevos' => json_encode(['analista_id' => $analista->id, 'reemplaza' => $reemplazar]),
+                'valores_nuevos' => json_encode(['analista_id' => $analista->id]),
             ]);
         });
     }

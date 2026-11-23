@@ -120,9 +120,10 @@ class TransicionesProcesoTest extends TestCase
         $this->assertSame(0, Proceso::visiblesPara($ana1)->count());
         $this->assertSame(1, Proceso::visiblesPara($ana2)->count());
 
-        $this->servicio->asignarAnalista($p, $ana1, $jefe, reemplazar: false);
+        // un solo analista: volver a asignar al primero deja sin acceso al segundo
+        $this->servicio->asignarAnalista($p, $ana1, $jefe);
         $this->assertSame(1, Proceso::visiblesPara($ana1)->count());
-        $this->assertSame(1, Proceso::visiblesPara($ana2)->count());
+        $this->assertSame(0, Proceso::visiblesPara($ana2)->count());
     }
 
     public function test_asignar_analista_solo_despues_de_enviar_a_revision(): void
