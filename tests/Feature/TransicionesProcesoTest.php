@@ -134,7 +134,7 @@ class TransicionesProcesoTest extends TestCase
 
         $this->assertFalse($this->servicio->puedeAsignarAnalista($p, $jefe));
         $this->actingAs($jefe);
-        Livewire::test(ViewProceso::class, ['record' => $p->getRouteKey()])->assertActionHidden('asignar_analista');
+        Livewire::test(ViewProceso::class, ['record' => $p->getRouteKey()])->assertActionDoesNotExist('asignar_analista');
 
         try {
             $this->servicio->asignarAnalista($p, $analista, $jefe);

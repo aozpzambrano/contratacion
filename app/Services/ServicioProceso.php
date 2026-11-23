@@ -124,7 +124,12 @@ class ServicioProceso
             if ($reemplazar) {
                 $proceso->asignaciones()
                     ->where('rol_id', $rolId)->where('activo', true)->where('user_id', '!=', $analista->id)
-                    ->update(['activo' => false, 'fecha_fin' => now(), 'updated_at' => now()]);
+                    ->update([
+                        'activo' => false,
+                        // hora de la base y nunca anterior al inicio (restriccion fecha_fin >= fecha_inicio)
+                        'fecha_fin' => DB::raw('GREATEST(now(), fecha_inicio)'),
+                        'updated_at' => DB::raw('now()'),
+                    ]);
             }
 
             $yaAsignado = $proceso->asignaciones()
