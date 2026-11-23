@@ -748,11 +748,6 @@ CREATE TRIGGER ofertas_hist_crear AFTER INSERT ON ofertas
 CREATE FUNCTION fn_asignar_ciclo() RETURNS trigger LANGUAGE plpgsql AS $$
 BEGIN
     SELECT ciclo INTO NEW.ciclo FROM procesos WHERE id = NEW.proceso_id;
-    IF TG_TABLE_NAME = 'publicaciones' THEN
-        IF NEW.secuencia > COALESCE(parametro_entero('maximo_publicaciones'), 2) THEN
-            RAISE EXCEPTION 'Se supero el numero maximo de publicaciones por ciclo';
-        END IF;
-    END IF;
     RETURN NEW;
 END $$;
 CREATE TRIGGER publicaciones_ciclo BEFORE INSERT ON publicaciones
@@ -819,7 +814,7 @@ CREATE FUNCTION fn_validar_proceso(p_id bigint, p_reglas jsonb) RETURNS text
 LANGUAGE plpgsql STABLE AS $$
 DECLARE
     v_p procesos%ROWTYPE; r record;
-    v_pubs int; v_ofs int; v_min int; v_max int;
+    v_pubs int; v_ofs int; v_min int;
 BEGIN
     SELECT * INTO v_p FROM procesos WHERE id = p_id;
     SELECT count(*) INTO v_pubs FROM publicaciones WHERE proceso_id = p_id AND ciclo = v_p.ciclo;
@@ -827,7 +822,6 @@ BEGIN
       FROM ofertas o JOIN publicaciones pu ON pu.id = o.publicacion_id
      WHERE o.proceso_id = p_id AND pu.ciclo = v_p.ciclo AND o.deleted_at IS NULL;
     v_min := COALESCE(parametro_entero('minimo_proformas'), 3);
-    v_max := COALESCE(parametro_entero('maximo_publicaciones'), 2);
 
     FOR r IN SELECT key, value FROM jsonb_each(p_reglas) LOOP
         CASE r.key
@@ -850,18 +844,12 @@ BEGIN
             END IF;
         WHEN 'requiere_publicacion' THEN
             IF v_pubs = 0 THEN RETURN 'No existe una publicacion registrada en el ciclo actual'; END IF;
-        WHEN 'publicaciones_menor_a' THEN
-            IF v_pubs >= COALESCE(parametro_entero(r.value #>> '{}'), v_max) THEN
-                RETURN 'Ya se alcanzo el maximo de publicaciones'; END IF;
         WHEN 'ofertas_menor_a' THEN
             IF v_ofs >= COALESCE(parametro_entero(r.value #>> '{}'), v_min) THEN
                 RETURN 'Ya se alcanzo el numero de ofertas requerido'; END IF;
         WHEN 'ofertas_para_comision' THEN
-            IF NOT (v_ofs >= v_min OR (v_pubs >= v_max AND v_ofs >= 1)) THEN
+            IF v_ofs < v_min THEN
                 RETURN 'No se cumple el numero de ofertas para enviar a comision'; END IF;
-        WHEN 'sin_ofertas_publicaciones_agotadas' THEN
-            IF NOT (v_pubs >= v_max AND v_ofs = 0) THEN
-                RETURN 'Solo procede la devolucion sin ofertas con las publicaciones agotadas'; END IF;
         WHEN 'requiere_devolucion_registrada' THEN
             IF NOT EXISTS (SELECT 1 FROM devoluciones WHERE proceso_id = p_id AND ciclo = v_p.ciclo) THEN
                 RETURN 'Debe registrar la devolucion (memorando) antes de la transicion'; END IF;
@@ -1001,7 +989,8 @@ BEGIN
        AND NOT EXISTS (
             SELECT 1 FROM documentos d JOIN estados_documento ed ON ed.id = d.estado_documento_id
              WHERE d.proceso_id = v_p.id AND d.tipo_documento_id = rq.tipo_documento_id
-               AND d.deleted_at IS NULL AND ed.grupo <> 'anulado' AND ed.orden >= em.orden);
+               AND d.deleted_at IS NULL AND ed.grupo <> 'anulado' AND ed.orden >= em.orden
+               AND EXISTS (SELECT 1 FROM documento_versiones dv WHERE dv.documento_id = d.id));
     IF v_falta IS NOT NULL THEN
         RAISE EXCEPTION 'Faltan documentos requeridos: %', v_falta;
     END IF;
@@ -1339,7 +1328,6 @@ INSERT INTO tipos_designacion (codigo, nombre, monto_minimo, orden) VALUES
 
 INSERT INTO parametros (clave, valor, tipo, descripcion) VALUES
  ('minimo_proformas','3','entero','Numero minimo de proformas para continuar a comision'),
- ('maximo_publicaciones','2','entero','Maximo de publicaciones por ciclo del proceso'),
  ('tamano_maximo_documento_mb','20','entero','Tamano maximo de archivo por defecto'),
  ('prefijo_institucion','AILEP','texto','Segunda parte del codigo del proceso: PE-AILEP-2026-001'),
  ('zona_horaria','America/Guayaquil','texto','Zona horaria para calcular el anio del codigo del proceso'),
@@ -1414,6 +1402,7 @@ INSERT INTO tipos_documento
 SELECT m.codigo, m.nombre, f.id, e.id, rg.id, rr.id, m.rev, m.apr, m.leg
   FROM (VALUES
     ('INFORME_NECESIDAD','Informe de necesidad','PREPARATORIA','ELABORACION_EXPEDIENTE','UNIDAD_REQUIRENTE','COMPRAS_ANALISTA',true,true,true),
+    ('ESPECIFICACIONES_TECNICAS','Especificaciones tecnicas','PREPARATORIA','ELABORACION_EXPEDIENTE','UNIDAD_REQUIRENTE','COMPRAS_ANALISTA',true,true,true),
     ('EXPEDIENTE_PREPARATORIO','Expediente preparatorio','PREPARATORIA','ELABORACION_EXPEDIENTE','UNIDAD_REQUIRENTE','COMPRAS_ANALISTA',true,true,true),
     ('PAC','Plan Anual de Contratacion (PAC)','PREPARATORIA','DOCUMENTACION_COMPLEMENTARIA','UNIDAD_REQUIRENTE','COMPRAS_ANALISTA',true,true,false),
     ('CERTIFICACION_PRESUPUESTARIA','Certificacion presupuestaria','PREPARATORIA','DOCUMENTACION_COMPLEMENTARIA','UNIDAD_REQUIRENTE','COMPRAS_ANALISTA',true,true,false),
@@ -1448,9 +1437,9 @@ SELECT eo.id, ed.id, m.codigo, m.nombre, em.id, p.id, m.coment, m.reglas::jsonb
     ('EN_REVISION','PARA_LEGALIZAR','validar_documentacion','Validar documentacion',NULL,'documentos.aprobar',false,'{"sin_observaciones_pendientes": true}'),
     ('PARA_LEGALIZAR','PARA_PUBLICAR','autorizar_publicacion','Autorizar publicacion','PRECONTRACTUAL','procesos.autorizar_transicion',false,'{}'),
     ('PARA_PUBLICAR','PUBLICADO','publicar','Publicar',NULL,'publicaciones.registrar',false,'{"requiere_codigo": true, "requiere_responsable": "COMPRAS_ANALISTA", "requiere_publicacion": true}'),
-    ('PUBLICADO','PUBLICADO','republicar','Republicar',NULL,'publicaciones.registrar',false,'{"publicaciones_menor_a": "maximo_publicaciones", "ofertas_menor_a": "minimo_proformas"}'),
+    ('PUBLICADO','PUBLICADO','republicar','Republicar',NULL,'publicaciones.registrar',false,'{"ofertas_menor_a": "minimo_proformas"}'),
     ('PUBLICADO','PARA_COMISION','enviar_a_comision','Enviar a comision',NULL,'procesos.autorizar_transicion',false,'{"ofertas_para_comision": true}'),
-    ('PUBLICADO','PARA_REAPERTURA','devolver_expediente','Devolver expediente',NULL,'procesos.devolver',true,'{"sin_ofertas_publicaciones_agotadas": true, "requiere_devolucion_registrada": true}'),
+    ('PUBLICADO','PARA_REAPERTURA','devolver_expediente','Devolver expediente',NULL,'procesos.devolver',true,'{"requiere_devolucion_registrada": true}'),
     ('PARA_COMISION','EN_COMISION','iniciar_comision','Iniciar comision',NULL,'designaciones.registrar',false,'{"requiere_designacion": true}'),
     ('EN_COMISION','APROBADO','aprobar_seleccion','Aprobar seleccion de proveedor',NULL,'ofertas.seleccionar',false,'{"requiere_oferta_seleccionada": true}'),
     ('EN_COMISION','PARA_REAPERTURA','recomendar_devolucion','Recomendar devolucion',NULL,'procesos.devolver',true,'{"requiere_devolucion_registrada": true}'),
@@ -1465,6 +1454,14 @@ SELECT eo.id, ed.id, m.codigo, m.nombre, em.id, p.id, m.coment, m.reglas::jsonb
   JOIN estados_proceso ed      ON ed.codigo = m.destino
   LEFT JOIN estados_macro em   ON em.codigo = m.macro
   JOIN permisos p              ON p.codigo  = m.permiso;
+
+-- Documentos que la unidad requirente debe cargar para enviar el proceso a revision (editable como dato)
+INSERT INTO transicion_proceso_requisitos (transicion_id, tipo_documento_id, estado_documento_minimo_id)
+SELECT t.id, td.id, (SELECT id FROM estados_documento WHERE codigo = 'BORRADOR')
+  FROM transiciones_proceso t
+  CROSS JOIN tipos_documento td
+ WHERE t.codigo IN ('enviar_a_revision', 'reenviar_a_revision')
+   AND td.codigo IN ('INFORME_NECESIDAD', 'ESPECIFICACIONES_TECNICAS');
 
 -- Transiciones de documento
 INSERT INTO transiciones_documento

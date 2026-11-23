@@ -103,7 +103,7 @@ erDiagram
 
 ```mermaid
 erDiagram
-    procesos ||--o{ publicaciones : "publica (1..2)"
+    procesos ||--o{ publicaciones : "publica (sin limite)"
     proveedores ||--o{ proveedor_alias : "alias"
     proveedores ||--o{ ofertas : "presenta"
     procesos ||--o{ ofertas : "recibe"
@@ -227,7 +227,7 @@ Notación: **PK**, *FK*, `U` único, `N` nullable. Se omiten `created_at`/`updat
 | AC | Regla: `parametros.minimo_proformas` |
 | AD | `tipos_designacion` + `designaciones` |
 | AE, AF | `documentos.numero_documento` (memorandos) con `designacion_id` |
-| AG–AJ, AL–AO | `publicaciones` (secuencia 1 y 2) |
+| AG–AJ, AL–AO | `publicaciones` (1..n por ciclo, sin límite) |
 | AK, AP | Calculados: conteo de `ofertas` por publicación |
 | AQ–AV | `ordenes_compra` |
 | AW–BC | `entregas`, `entrega_items` |
@@ -275,9 +275,9 @@ Mapeo del Excel: `EN PROCESO` → según avance real del proceso; `PROCESO DEVUE
 | 5 | EN_REVISION → PARA_LEGALIZAR | `validar_documentacion` | `documentos.aprobar` | — | "¿Correcto y completo?" = sí. Sin observaciones pendientes. |
 | 6 | PARA_LEGALIZAR → PARA_PUBLICAR | `autorizar_publicacion` | `procesos.autorizar_transicion` | Precontractual | "Solicitar publicación". Documentos legalizados. |
 | 7 | PARA_PUBLICAR → PUBLICADO | `publicar` | `publicaciones.registrar` | — | Exige responsable asignado y publicación registrada (NC). |
-| 8 | PUBLICADO → PUBLICADO | `republicar` | `publicaciones.registrar` | — | Si ofertas < mínimo y publicaciones < máximo. |
-| 9 | PUBLICADO → PARA_COMISION | `enviar_a_comision` | `procesos.autorizar_transicion` | — | Ofertas ≥ mínimo, o ≥ 1 tras agotar publicaciones. |
-| 10 | PUBLICADO → PARA_REAPERTURA | `devolver_expediente` | `procesos.autorizar_transicion` | — | 0 ofertas tras agotar publicaciones. "Memorando de devolución". |
+| 8 | PUBLICADO → PUBLICADO | `republicar` | `publicaciones.registrar` | — | Mientras las ofertas sean menos que el mínimo (sin límite de publicaciones). |
+| 9 | PUBLICADO → PARA_COMISION | `enviar_a_comision` | `procesos.autorizar_transicion` | — | Ofertas ≥ mínimo (supuesto: sin excepción). |
+| 10 | PUBLICADO → PARA_REAPERTURA | `devolver_expediente` | `procesos.autorizar_transicion` | — | Compras puede devolver en cualquier momento de "Publicado" con "Memorando de devolución" registrado (supuesto). |
 | 11 | PARA_COMISION → EN_COMISION | `iniciar_comision` | `designaciones.registrar` | — | Designación registrada (tipo según monto). |
 | 12 | EN_COMISION → APROBADO | `aprobar_seleccion` | `ofertas.seleccionar` | — | Oferta seleccionada y informe aprobado. |
 | 13 | EN_COMISION → PARA_REAPERTURA | `recomendar_devolucion` | `ofertas.evaluar` | — | "No existe proforma seleccionable". |
@@ -307,7 +307,6 @@ Transiciones: `cargar_version`, `asignar_revisor`, `iniciar_revision`, `registra
 | Clave | Valor | Origen |
 |---|---|---|
 | `minimo_proformas` | 3 | Excel AC. Bizagi: "número de ofertas solicitado". |
-| `maximo_publicaciones` | 2 | Excel (Publicación 1 y 2). **Por confirmar.** |
 | `tamano_maximo_documento_mb` | 20 | Propuesto. |
 
 Umbrales de designación (100.000 y 500.000) viven en `tipos_designacion.monto_minimo`: `DELEGADO` (0), `COMISION` (100.000), `COMISION_FINANCIERO_JURIDICO` (500.000).
@@ -451,3 +450,12 @@ Formato: `<prefijo del tipo>-<prefijo institucional>-<año>-<número>`, p. ej. `
 - La transición `publicar` exige que el proceso ya tenga código (regla `requiere_codigo`).
 - El código no se puede escribir ni cambiar a mano (trigger); al reabrir el proceso se conserva. La asignación queda en `auditoria`.
 - Se eliminan `procesos.anio` y `procesos.numero_pedido`. Las vistas calculan `anio_creacion` desde `created_at`.
+
+
+---
+
+## 14. Documentos requeridos y publicaciones (Entrega D2, definiciones)
+
+- **Enviar a revisión** (`enviar_a_revision` y `reenviar_a_revision`) exige dos documentos con al menos una versión cargada (archivo): **Informe de necesidad** y **Especificaciones técnicas**. Son documentos distintos y siguen el mismo flujo: revisión, aprobación y legalización. La legalización consiste en subir el PDF con firma electrónica. Los requisitos están en `transicion_proceso_requisitos` y se editan como dato. Los demás documentos del gráfico de Bizagi se incorporarán al avanzar en los flujos.
+- **Publicaciones:** no hay límite por ciclo (se elimina el parámetro `maximo_publicaciones`). Un proceso se republica mientras las ofertas sean menos que `minimo_proformas`.
+- **Pendiente (se retomará antes de la fase contractual):** si el proceso solo puede reabrirse dentro del año en curso y pasar a "Finalizado" al cambiar el año.

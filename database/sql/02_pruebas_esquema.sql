@@ -21,6 +21,23 @@ BEGIN
     RAISE NOTICE 'OK: %', p_msg;
 END $$;
 
+-- Carga un documento con una version (archivo) para un proceso
+CREATE FUNCTION pg_temp.cargar_documento(p_proceso bigint, p_tipo text, p_user bigint, p_con_version boolean DEFAULT true)
+RETURNS bigint LANGUAGE plpgsql AS $$
+DECLARE v_d bigint; v_a bigint;
+BEGIN
+    INSERT INTO documentos (proceso_id,tipo_documento_id,estado_documento_id,titulo,creado_por)
+        VALUES (p_proceso,(SELECT id FROM tipos_documento WHERE codigo=p_tipo),
+                (SELECT id FROM estados_documento WHERE codigo='BORRADOR'),p_tipo,p_user) RETURNING id INTO v_d;
+    IF p_con_version THEN
+        INSERT INTO archivos (disco,ruta,nombre_original,nombre_interno,extension,mime,tamano_bytes,hash_sha256,user_id)
+            VALUES ('documentos','x/'||v_d||'.pdf',p_tipo||'.pdf',gen_random_uuid()||'.pdf','pdf','application/pdf',10,repeat('c',64),p_user)
+            RETURNING id INTO v_a;
+        INSERT INTO documento_versiones (documento_id,numero_version,archivo_id,user_id) VALUES (v_d,0,v_a,p_user);
+    END IF;
+    RETURN v_d;
+END $$;
+
 DO $prueba$
 DECLARE
     u_ur bigint; u_cj bigint; u_ca bigint; u_ct bigint; u_ac bigint; u_x bigint;
@@ -74,6 +91,16 @@ BEGIN
             (u_ct,'COMISION_TECNICA',f_pre),(u_ac,'ADMIN_CONTRATO',f_con)) m(u,rol,f)
         JOIN roles r ON r.codigo=m.rol;
     PERFORM pg_temp.falla(format('SELECT aplicar_transicion_proceso(%s,%L,%s)',v_p,'publicar',u_ca),'no esta permitida');
+    -- Documentos requeridos para enviar a revision: informe de necesidad y especificaciones tecnicas, con archivo
+    PERFORM pg_temp.falla(format('SELECT aplicar_transicion_proceso(%s,%L,%s)',v_p,'enviar_a_revision',u_ur),'Faltan documentos requeridos');
+    v_tmp := pg_temp.cargar_documento(v_p,'INFORME_NECESIDAD',u_ur,false);
+    v_tmp := pg_temp.cargar_documento(v_p,'ESPECIFICACIONES_TECNICAS',u_ur);
+    PERFORM pg_temp.falla(format('SELECT aplicar_transicion_proceso(%s,%L,%s)',v_p,'enviar_a_revision',u_ur),'Informe de necesidad');
+    INSERT INTO archivos (disco,ruta,nombre_original,nombre_interno,extension,mime,tamano_bytes,hash_sha256,user_id)
+        VALUES ('documentos','x/inf.pdf','inf.pdf',gen_random_uuid()||'.pdf','pdf','application/pdf',10,repeat('d',64),u_ur) RETURNING id INTO v_arch;
+    INSERT INTO documento_versiones (documento_id,numero_version,archivo_id,user_id)
+        VALUES ((SELECT id FROM documentos WHERE proceso_id=v_p AND tipo_documento_id=(SELECT id FROM tipos_documento WHERE codigo='INFORME_NECESIDAD')),0,v_arch,u_ur);
+    PERFORM pg_temp.verifica(true,'enviar a revision exige ambos documentos con archivo cargado');
     PERFORM aplicar_transicion_proceso(v_p,'enviar_a_revision',u_ur);
     PERFORM pg_temp.verifica((SELECT ep.codigo FROM procesos p JOIN estados_proceso ep ON ep.id=p.estado_proceso_id WHERE p.id=v_p)='EN_REVISION',
         'enviar_a_revision -> EN_REVISION con permiso y asignacion');
@@ -181,8 +208,6 @@ BEGIN
     INSERT INTO publicaciones (proceso_id,secuencia,codigo_nc,fecha_publicacion,fecha_limite)
         VALUES (v_p,1,'NC-1798194964001-2026-00001',now(),now()+interval '2 days') RETURNING id INTO v_pub1;
     PERFORM aplicar_transicion_proceso(v_p,'publicar',u_ca);
-    PERFORM pg_temp.falla(format('INSERT INTO publicaciones (proceso_id,secuencia,codigo_nc,fecha_publicacion,fecha_limite) VALUES (%s,3,%L,now(),now())',v_p,'NC-X'),
-        'numero maximo de publicaciones');
     FOR i IN 1..3 LOOP
         INSERT INTO proveedores (razon_social) VALUES ('Proveedor '||i) RETURNING id INTO v_tmp; v_prov[i] := v_tmp;
     END LOOP;
@@ -284,15 +309,19 @@ BEGIN
         VALUES (v_tp,'Con requisitos',v_mac,v_ini,u_ur) RETURNING id INTO v_p3;
     INSERT INTO asignaciones_proceso (proceso_id,user_id,rol_id,fase_id,asignado_por)
         VALUES (v_p3,u_ur,(SELECT id FROM roles WHERE codigo='UNIDAD_REQUIRENTE'),f_prep,u_cj);
-    INSERT INTO transicion_proceso_requisitos (transicion_id,tipo_documento_id,estado_documento_minimo_id)
-        SELECT t.id,(SELECT id FROM tipos_documento WHERE codigo='INFORME_NECESIDAD'),(SELECT id FROM estados_documento WHERE codigo='BORRADOR')
-          FROM transiciones_proceso t WHERE t.codigo='enviar_a_revision' AND t.estado_origen_id=v_ini;
-    PERFORM pg_temp.falla(format('SELECT aplicar_transicion_proceso(%s,%L,%s)',v_p3,'enviar_a_revision',u_ur),'Faltan documentos requeridos: Informe de necesidad');
-    INSERT INTO documentos (proceso_id,tipo_documento_id,estado_documento_id,titulo,creado_por)
-        VALUES (v_p3,(SELECT id FROM tipos_documento WHERE codigo='INFORME_NECESIDAD'),
-                (SELECT id FROM estados_documento WHERE codigo='BORRADOR'),'Informe',u_ur);
+    PERFORM pg_temp.falla(format('SELECT aplicar_transicion_proceso(%s,%L,%s)',v_p3,'enviar_a_revision',u_ur),'Faltan documentos requeridos');
+    v_tmp := pg_temp.cargar_documento(v_p3,'INFORME_NECESIDAD',u_ur);
+    PERFORM pg_temp.falla(format('SELECT aplicar_transicion_proceso(%s,%L,%s)',v_p3,'enviar_a_revision',u_ur),'Especificaciones tecnicas');
+    v_tmp := pg_temp.cargar_documento(v_p3,'ESPECIFICACIONES_TECNICAS',u_ur);
     PERFORM aplicar_transicion_proceso(v_p3,'enviar_a_revision',u_ur);
     PERFORM pg_temp.verifica(true,'documento requerido bloquea y luego habilita la transicion');
+
+    -- Sin limite de publicaciones por ciclo
+    FOR i IN 1..6 LOOP
+        INSERT INTO publicaciones (proceso_id,secuencia,codigo_nc,fecha_publicacion,fecha_limite)
+            VALUES (v_p3,i,'NC-LIB-'||i,now(),now()+interval '1 day');
+    END LOOP;
+    PERFORM pg_temp.verifica((SELECT count(*) FROM publicaciones WHERE proceso_id=v_p3)=6,'no hay limite de publicaciones por ciclo');
 
     -- 11. Todas las vistas se pueden consultar
     PERFORM pg_temp.verifica((SELECT count(*) FROM v_matriz_contratacion WHERE proceso_id=v_p)=2

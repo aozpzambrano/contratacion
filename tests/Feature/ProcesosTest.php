@@ -13,6 +13,7 @@ use App\Models\TipoProceso;
 use App\Models\User;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Str;
 use Livewire\Livewire;
 use Tests\TestCase;
 
@@ -40,6 +41,32 @@ class ProcesosTest extends TestCase
             'rol_id' => Rol::where('codigo', $rol)->value('id'),
             'fase_id' => Fase::where('codigo', 'PREPARATORIA')->value('id'),
             'asignado_por' => $por->id,
+        ]);
+    }
+
+    /** Carga un documento con una version (archivo) para cumplir los requisitos de la transicion. */
+    private function cargarDocumento(Proceso $p, string $tipo, User $usuario): void
+    {
+        $documento = DB::table('documentos')->insertGetId([
+            'proceso_id' => $p->id,
+            'tipo_documento_id' => DB::table('tipos_documento')->where('codigo', $tipo)->value('id'),
+            'estado_documento_id' => DB::table('estados_documento')->where('codigo', 'BORRADOR')->value('id'),
+            'titulo' => $tipo,
+            'creado_por' => $usuario->id,
+        ]);
+        $archivo = DB::table('archivos')->insertGetId([
+            'disco' => 'documentos',
+            'ruta' => 'pruebas/'.$documento.'.pdf',
+            'nombre_original' => $tipo.'.pdf',
+            'nombre_interno' => Str::uuid().'.pdf',
+            'extension' => 'pdf',
+            'mime' => 'application/pdf',
+            'tamano_bytes' => 10,
+            'hash_sha256' => str_repeat('a', 64),
+            'user_id' => $usuario->id,
+        ]);
+        DB::table('documento_versiones')->insert([
+            'documento_id' => $documento, 'numero_version' => 0, 'archivo_id' => $archivo, 'user_id' => $usuario->id,
         ]);
     }
 
@@ -122,12 +149,30 @@ class ProcesosTest extends TestCase
         $p = Proceso::firstOrFail();
         $this->assertTrue($unidad->can('update', $p->fresh()));
 
+        $this->cargarDocumento($p, 'INFORME_NECESIDAD', $unidad);
+        $this->cargarDocumento($p, 'ESPECIFICACIONES_TECNICAS', $unidad);
         DB::select('select aplicar_transicion_proceso(?, ?, ?, ?)', [$p->id, 'enviar_a_revision', $unidad->id, null]);
 
         $p = $p->fresh();
         $this->assertSame('EN_REVISION', $p->estadoProceso->codigo);
         $this->assertSame(2, $p->historial()->count());
         $this->assertFalse($unidad->can('update', $p));
+    }
+
+    public function test_enviar_a_revision_exige_informe_y_especificaciones_con_archivo(): void
+    {
+        $unidad = User::factory()->conRoles('UNIDAD_REQUIRENTE')->create();
+        $p = $this->proceso($unidad);
+        $this->asignar($p, $unidad, 'UNIDAD_REQUIRENTE', $unidad);
+
+        $enviar = fn () => DB::select('select aplicar_transicion_proceso(?, ?, ?, ?)', [$p->id, 'enviar_a_revision', $unidad->id, null]);
+
+        try {
+            $enviar();
+            $this->fail('Debio exigir los documentos');
+        } catch (\Illuminate\Database\QueryException $e) {
+            $this->assertStringContainsString('Faltan documentos requeridos', $e->getMessage());
+        }
     }
 
     public function test_el_estado_no_se_puede_cambiar_por_update_directo(): void
