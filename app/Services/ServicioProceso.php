@@ -77,6 +77,20 @@ class ServicioProceso
         )->codigo);
     }
 
+    /**
+     * Asignar analista solo procede cuando la unidad requirente ya envio el proceso a revision:
+     * no en el estado inicial ni en los finales (se usan las marcas es_inicial / es_final del catalogo).
+     */
+    public function puedeAsignarAnalista(Proceso $proceso, User $usuario): bool
+    {
+        $estado = $proceso->estadoProceso;
+
+        return $usuario->tienePermiso('procesos.asignar_responsables')
+            && $estado !== null
+            && ! $estado->es_inicial
+            && ! $estado->es_final;
+    }
+
     /** Analistas de Compras activos (candidatos a responsable del proceso). */
     public function analistasDisponibles(): Collection
     {
@@ -95,6 +109,9 @@ class ServicioProceso
     {
         if (! $jefe->tienePermiso('procesos.asignar_responsables')) {
             throw new DomainException('No tiene permiso para asignar responsables.');
+        }
+        if (! $this->puedeAsignarAnalista($proceso, $jefe)) {
+            throw new DomainException('Solo se puede asignar analista despues de que la unidad requirente envie el proceso a revision.');
         }
         if (! $analista->activo || ! $analista->tieneRol('COMPRAS_ANALISTA')) {
             throw new DomainException('El usuario elegido no es un analista de Compras activo.');

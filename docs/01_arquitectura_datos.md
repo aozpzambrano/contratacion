@@ -470,6 +470,6 @@ En el detalle del proceso (`/admin/procesos/{id}`) el usuario ve solo los botone
 |---|---|---|
 | Transiciones del flujo (Enviar a revisión, Solicitar correcciones, Validar documentación, Autorizar publicación…) | Quien tiene el permiso de la transición, opera en la fase actual con su rol y, si el permiso lo exige, está asignado al proceso | Se ejecuta con `aplicar_transicion_proceso()`. Si la transición exige comentario, el formulario lo pide. Los errores de la base (documentos faltantes, observaciones pendientes, etc.) se muestran tal cual. |
 | Generar código del proceso | Analista asignado, con `procesos.asignar_codigo` | Solo si el proceso no tiene código y está en un estado con `permite_asignar_codigo`. |
-| Asignar analista | Jefe de Compras (`procesos.asignar_responsables`) | Elige un analista activo; por defecto reemplaza al analista actual (puede sumar otro). Queda en `auditoria` (`proceso.analista_asignado`). |
+| Asignar analista | Jefe de Compras (`procesos.asignar_responsables`), solo después de que la unidad requirente envíe el proceso a revisión (estados que no son inicial ni final) | Elige un analista activo; por defecto reemplaza al analista actual (puede sumar otro). Queda en `auditoria` (`proceso.analista_asignado`). |
 
 La lógica está en `App\Services\ServicioProceso`; las pantallas solo la invocan. Las transiciones que dependen de módulos aún no construidos (publicaciones, ofertas, designaciones, órdenes de compra) aparecen con su permiso, pero la base responde con el requisito que falta hasta que existan esos módulos.

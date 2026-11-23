@@ -107,7 +107,9 @@ class TransicionesProcesoTest extends TestCase
         $unidad = User::factory()->conRoles('UNIDAD_REQUIRENTE')->create();
         $ana1 = User::factory()->conRoles('COMPRAS_ANALISTA')->create();
         $ana2 = User::factory()->conRoles('COMPRAS_ANALISTA')->create();
-        $p = $this->proceso($unidad);
+        $p = $this->procesoListoParaEnviar($unidad);
+        $this->servicio->aplicarTransicion($p, $this->transicion('enviar_a_revision'), $unidad);
+        $p = $p->fresh();
 
         $this->assertSame(0, Proceso::visiblesPara($ana1)->count());
 
@@ -123,12 +125,37 @@ class TransicionesProcesoTest extends TestCase
         $this->assertSame(1, Proceso::visiblesPara($ana2)->count());
     }
 
+    public function test_asignar_analista_solo_despues_de_enviar_a_revision(): void
+    {
+        $jefe = User::factory()->conRoles('COMPRAS_JEFE')->create();
+        $analista = User::factory()->conRoles('COMPRAS_ANALISTA')->create();
+        $unidad = User::factory()->conRoles('UNIDAD_REQUIRENTE')->create();
+        $p = $this->procesoListoParaEnviar($unidad);
+
+        $this->assertFalse($this->servicio->puedeAsignarAnalista($p, $jefe));
+        $this->actingAs($jefe);
+        Livewire::test(ViewProceso::class, ['record' => $p->getRouteKey()])->assertActionHidden('asignar_analista');
+
+        try {
+            $this->servicio->asignarAnalista($p, $analista, $jefe);
+            $this->fail('No debe asignar antes de enviar a revision');
+        } catch (DomainException $e) {
+            $this->assertStringContainsString('despues de que la unidad requirente envie', $e->getMessage());
+        }
+
+        $this->servicio->aplicarTransicion($p, $this->transicion('enviar_a_revision'), $unidad);
+        $this->assertTrue($this->servicio->puedeAsignarAnalista($p->fresh(), $jefe));
+        Livewire::test(ViewProceso::class, ['record' => $p->getRouteKey()])->assertActionVisible('asignar_analista');
+    }
+
     public function test_solo_el_jefe_asigna_y_solo_a_analistas(): void
     {
         $jefe = User::factory()->conRoles('COMPRAS_JEFE')->create();
         $analista = User::factory()->conRoles('COMPRAS_ANALISTA')->create();
         $unidad = User::factory()->conRoles('UNIDAD_REQUIRENTE')->create();
-        $p = $this->proceso($unidad);
+        $p = $this->procesoListoParaEnviar($unidad);
+        $this->servicio->aplicarTransicion($p, $this->transicion('enviar_a_revision'), $unidad);
+        $p = $p->fresh();
 
         try {
             $this->servicio->asignarAnalista($p, $analista, $analista);

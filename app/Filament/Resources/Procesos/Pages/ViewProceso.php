@@ -56,7 +56,7 @@ class ViewProceso extends ViewRecord
         }
 
         // El jefe de Compras asigna al analista responsable
-        if ($usuario->tienePermiso('procesos.asignar_responsables')) {
+        if ($servicio->puedeAsignarAnalista($proceso, $usuario)) {
             $acciones[] = Action::make('asignar_analista')
                 ->label('Asignar analista')
                 ->color('gray')
