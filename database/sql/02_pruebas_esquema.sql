@@ -151,6 +151,15 @@ BEGIN
 
     -- La version actual debe pertenecer al mismo documento
     SET CONSTRAINTS ALL IMMEDIATE;
+    -- un solo documento por tipo y proceso (las correcciones son versiones); 'OTROS' admite varios
+    PERFORM pg_temp.falla(format('INSERT INTO documentos (proceso_id,tipo_documento_id,estado_documento_id,titulo,creado_por) VALUES (%s,%s,(SELECT id FROM estados_documento WHERE codigo=%L),%L,%s)',
+        v_p,v_doc_tipo,'BORRADOR','Duplicado',u_ur),'cargue una nueva version');
+    PERFORM pg_temp.verifica(
+        (SELECT permite_multiples FROM tipos_documento WHERE codigo='OTROS')
+        AND NOT (SELECT permite_multiples FROM tipos_documento WHERE codigo='INFORME_NECESIDAD')
+        AND (SELECT extensiones_permitidas FROM tipos_documento WHERE codigo='MEMORANDO_SOLICITUD_PUBLICACION')='pdf',
+        'unico por tipo; memorando de publicacion solo PDF y admite varios');
+    v_doc_tipo := (SELECT id FROM tipos_documento WHERE codigo='OTROS');
     INSERT INTO documentos (proceso_id,tipo_documento_id,estado_documento_id,titulo,creado_por)
         VALUES (v_p,v_doc_tipo,(SELECT id FROM estados_documento WHERE codigo='BORRADOR'),'Otro',u_ur) RETURNING id INTO v_d2;
     INSERT INTO archivos (disco,ruta,nombre_original,nombre_interno,extension,mime,tamano_bytes,hash_sha256,user_id)
@@ -162,7 +171,14 @@ BEGIN
     -- 6. Publicaciones y ofertas
     -- 8b. Codigo del proceso: solo en estados permitidos, por quien tiene el permiso y esta asignado
     PERFORM pg_temp.falla(format('SELECT asignar_codigo_proceso(%s,%s)',v_p,u_ca),'no se puede asignar el codigo');
-    PERFORM aplicar_transicion_proceso(v_p,'autorizar_publicacion',u_cj);
+    -- el analista que valido no autoriza la publicacion hasta que el Jefe lo asigne de nuevo en esta etapa
+    PERFORM pg_temp.falla(format('SELECT aplicar_transicion_proceso(%s,%L,%s)',v_p,'autorizar_publicacion',u_ca),'asignar nuevamente al analista');
+    UPDATE asignaciones_proceso SET activo=false, fecha_fin=GREATEST(now(),fecha_inicio)
+     WHERE proceso_id=v_p AND activo AND rol_id=(SELECT id FROM roles WHERE codigo='COMPRAS_ANALISTA');
+    INSERT INTO asignaciones_proceso (proceso_id,user_id,rol_id,fase_id,asignado_por)
+        VALUES (v_p,u_ca,(SELECT id FROM roles WHERE codigo='COMPRAS_ANALISTA'),(SELECT id FROM fases WHERE codigo='PREPARATORIA'),u_cj);
+    PERFORM pg_temp.verifica(proceso_tiene_asignacion_desde_estado(v_p,'COMPRAS_ANALISTA',u_ca),'nueva asignacion posterior a la entrada al estado');
+    PERFORM aplicar_transicion_proceso(v_p,'autorizar_publicacion',u_ca);
     PERFORM pg_temp.verifica((SELECT em.codigo FROM procesos p JOIN estados_macro em ON em.id=p.estado_macro_id WHERE p.id=v_p)='PRECONTRACTUAL',
         'autorizar_publicacion cambia el macro a PRECONTRACTUAL');
     PERFORM pg_temp.falla(format('SELECT aplicar_transicion_proceso(%s,%L,%s)',v_p,'publicar',u_ca),'debe tener codigo');

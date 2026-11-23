@@ -38,6 +38,15 @@ return [
             'report' => false,
         ],
 
+        // Documentos del expediente: privado, nunca se sirve por URL publica (solo por el controlador de descarga).
+        'documentos' => [
+            'driver' => 'local',
+            'root' => storage_path('app/private/documentos'),
+            'visibility' => 'private',
+            'throw' => true,
+            'report' => false,
+        ],
+
         'public' => [
             'driver' => 'local',
             'root' => storage_path('app/public'),

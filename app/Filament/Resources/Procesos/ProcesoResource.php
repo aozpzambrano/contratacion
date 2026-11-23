@@ -6,6 +6,7 @@ use App\Filament\Resources\Procesos\Pages\CreateProceso;
 use App\Filament\Resources\Procesos\Pages\EditProceso;
 use App\Filament\Resources\Procesos\Pages\ListProcesos;
 use App\Filament\Resources\Procesos\Pages\ViewProceso;
+use App\Filament\Resources\Procesos\RelationManagers\DocumentosRelationManager;
 use App\Filament\Resources\Procesos\Schemas\ProcesoForm;
 use App\Filament\Resources\Procesos\Schemas\ProcesoInfolist;
 use App\Filament\Resources\Procesos\Tables\ProcesosTable;
@@ -55,6 +56,11 @@ class ProcesoResource extends Resource
     public static function table(Table $table): Table
     {
         return ProcesosTable::configure($table);
+    }
+
+    public static function getRelations(): array
+    {
+        return [DocumentosRelationManager::class];
     }
 
     public static function getPages(): array

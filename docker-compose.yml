@@ -24,6 +24,7 @@ services:
     volumes:
       - .:/var/www/html                                  # código en vivo
       - docs_data:/var/www/html/storage/app/private      # documentos cargados
+      - ./docker/php/uploads.ini:/usr/local/etc/php/conf.d/uploads.ini:ro   # limites de carga (20 MB + margen)
     ports:
       - "8000:8000"
     depends_on:

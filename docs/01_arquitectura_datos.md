@@ -270,7 +270,7 @@ Mapeo del Excel: `EN PROCESO` → según avance real del proceso; `PROCESO DEVUE
 |---|---|---|---|---|---|
 | 1 | ∅ → INICIO | `crear` | `procesos.crear` | Preparatoria | Evento inicio + "Seleccionar tipo de proceso". |
 | 2 | INICIO → EN_REVISION | `enviar_a_revision` | `procesos.enviar_a_revision` | — | Genera expediente preparatorio. Exige documentos del expediente cargados. |
-| 3 | EN_REVISION → EN_CORRECCION | `solicitar_correcciones` | `documentos.solicitar_correccion` | — | "Notificar observaciones". Comentario obligatorio. |
+| 3 | EN_REVISION → EN_CORRECCION | `solicitar_correcciones` | `documentos.solicitar_correccion` | — | Se rotula "Remitir observaciones". Comentario opcional. |
 | 4 | EN_CORRECCION → EN_REVISION | `reenviar_a_revision` | `procesos.enviar_a_revision` | — | Ciclo de corrección. Exige nueva versión de documentos observados. |
 | 5 | EN_REVISION → PARA_LEGALIZAR | `validar_documentacion` | `documentos.aprobar` | — | "¿Correcto y completo?" = sí. Sin observaciones pendientes. |
 | 6 | PARA_LEGALIZAR → PARA_PUBLICAR | `autorizar_publicacion` | `procesos.autorizar_transicion` | Precontractual | "Solicitar publicación". Documentos legalizados. |
@@ -468,8 +468,62 @@ En el detalle del proceso (`/admin/procesos/{id}`) el usuario ve solo los botone
 
 | Botón | Quién lo ve | Regla |
 |---|---|---|
-| Transiciones del flujo (Enviar a revisión, Solicitar correcciones, Validar documentación, Autorizar publicación…) | Quien tiene el permiso de la transición, opera en la fase actual con su rol y, si el permiso lo exige, está asignado al proceso | Se ejecuta con `aplicar_transicion_proceso()`. Si la transición exige comentario, el formulario lo pide. Los errores de la base (documentos faltantes, observaciones pendientes, etc.) se muestran tal cual. |
+| Transiciones del flujo (Enviar a revisión, Remitir observaciones, Validar documentación, Autorizar publicación…) | Quien tiene el permiso de la transición, opera en la fase actual con su rol y, si el permiso lo exige, está asignado al proceso | Se ejecuta con `aplicar_transicion_proceso()`. Si la transición exige comentario, el formulario lo pide. Los errores de la base (documentos faltantes, observaciones pendientes, etc.) se muestran tal cual. |
 | Generar código del proceso | Analista asignado, con `procesos.asignar_codigo` | Solo si el proceso no tiene código y está en un estado con `permite_asignar_codigo`. |
-| Asignar analista | Jefe de Compras (`procesos.asignar_responsables`), solo después de que la unidad requirente envíe el proceso a revisión (estados que no son inicial ni final) | Elige un analista activo; por defecto reemplaza al analista actual (puede sumar otro). Queda en `auditoria` (`proceso.analista_asignado`). |
+| Asignar analista | Jefe de Compras (`procesos.asignar_responsables`), solo después de que la unidad requirente envíe el proceso a revisión (estados que no son inicial ni final) | Elige un analista activo. Hay un único analista responsable por proceso: asignar a otro reemplaza al actual. Queda en `auditoria` (`proceso.analista_asignado`). |
 
 La lógica está en `App\Services\ServicioProceso`; las pantallas solo la invocan. Las transiciones que dependen de módulos aún no construidos (publicaciones, ofertas, designaciones, órdenes de compra) aparecen con su permiso, pero la base responde con el requisito que falta hasta que existan esos módulos.
+
+## 16. Documentos (Etapa 7 - Entrega E1)
+
+- Los archivos se guardan en el disco privado `documentos` (`storage/app/private/documentos`), nunca con URL publica.
+  Ruta final: `procesos/{proceso}/documentos/{documento}/{uuid}.{ext}`; el nombre original solo vive en `archivos`.
+- Formatos: PDF, Word y Excel (`tipos_documento.extensiones_permitidas`, por defecto `pdf,doc,docx,xls,xlsx`).
+  La version legalizada (E2) debe ser PDF. Los PDF se verifican por su cabecera `%PDF-`.
+- Tamano maximo: el menor entre el parametro `tamano_maximo_documento_mb` (20) y `tipos_documento.tamano_maximo_mb`.
+  `docker/php/uploads.ini` sube los limites de PHP a 25 MB para que el parametro sea el que decida.
+- Cada carga crea un documento en BORRADOR con su version 1; cada nueva version la numera la BD (`fn_numerar_version`)
+  y pasa a ser la vigente. Solo se agregan versiones en BORRADOR o EN_CORRECCION.
+- Quien carga: la unidad requirente mientras el proceso es editable (INICIO / EN_CORRECCION); despues, solo el
+  analista asignado. Tipos disponibles: los de la fase actual cuyo rol generador tiene el usuario.
+- Al aplicar `enviar_a_revision` o `reenviar_a_revision` al proceso, en la misma transaccion los documentos en
+  BORRADOR (con version y que exigen revision) pasan a PENDIENTE_REVISION (`aplicar_transicion_documento`).
+- Descarga: ruta `documentos.descargar`, exige `documentos.descargar` y que el proceso sea visible para el usuario;
+  siempre como adjunto y con evento `documento.descargado` en `auditoria`.
+- Pendiente (E2): asignar revisor, observaciones, correcciones, aprobacion y legalizacion (PDF firmado).
+
+## 17. Ajustes a documentos (Entrega E1.1)
+
+- **Un documento por tipo y proceso.** El trigger `documentos_unico_por_tipo` rechaza un segundo documento vigente (no anulado) del mismo tipo salvo que `tipos_documento.permite_multiples` sea `true` (memorando de solicitud de publicacion, documentacion complementaria, proformas, solicitud de pago, otros). Las correcciones son versiones del mismo documento; al legalizar (E2) el PDF firmado quedara como la version legalizada del mismo registro.
+- **Descarga.** Solo la ultima version (la vigente) se descarga; las anteriores se listan en "Versiones" como registro de respaldo.
+- **Quien sube versiones.**
+  - Unidad requirente: documento en BORRADOR, CON_OBSERVACIONES o EN_CORRECCION y proceso editable.
+  - Analista de Compras asignado: documento en PENDIENTE_REVISION, EN_REVISION, CON_OBSERVACIONES o EN_CORRECCION; el estado del documento se conserva. La accion se rotula "Subir documento" para el analista y "Nueva version" para la unidad.
+- **Analista y proceso.** El analista ya no tiene `procesos.editar`: no modifica los datos del proceso ni sus items (solo la unidad requirente). Ve los documentos al abrir el proceso ("Ver").
+- **Reenvio.** La transicion `reenviar_a_revision` se rotula "Enviar a revision". Al aplicarla, los documentos CON_OBSERVACIONES / EN_CORRECCION vuelven a PENDIENTE_REVISION (la asignacion de correccion se crea y cierra automaticamente hasta que E2 registre observaciones con su propio flujo).
+- **Tipo nuevo.** `MEMORANDO_SOLICITUD_PUBLICACION` (PREPARATORIA, rol generador UNIDAD_REQUIRENTE, solo PDF, admite varios: uno por cada solicitud de publicacion).
+- **Administracion (solo ADMIN, grupo "Administracion").**
+  - `Tipos de documento` (`/admin/tipos-documento`, permiso `catalogos.editar`): crear/editar tipos, formatos, tamano, roles, flujo. No se eliminan, se desactivan.
+  - `Documentos obligatorios` (`/admin/documentos-obligatorios`, permiso `flujos.editar`): que documentos exige cada transicion del proceso (tabla `transicion_proceso_requisitos`). La BD los valida en `aplicar_transicion_proceso()`.
+  - Las politicas exigen `*.editar` incluso para listar, porque otros roles tienen `catalogos.ver` / `flujos.ver`.
+- **Pendiente para E2:** revision, observaciones, validacion ("Para legalizar"), legalizacion con PDF firmado, solicitud de publicacion (numero de memorando manual y horas de cada publicacion) y la reasignacion del analista antes de autorizar la publicacion.
+
+## 18. Revision y validacion de la documentacion (Entrega E2a)
+
+Las acciones del proceso arrastran a sus documentos en la misma transaccion (`ServicioProceso::aplicarTransicion` + `ServicioDocumento`):
+
+| Accion del proceso | Quien | Efecto en los documentos |
+|---|---|---|
+| Enviar / Reenviar a revision | Unidad requirente | BORRADOR -> PENDIENTE_REVISION. En el reenvio, los documentos CON_OBSERVACIONES exigen una version posterior a la observada; se registra la `correccion` y vuelven a PENDIENTE_REVISION. |
+| Remitir observaciones (`solicitar_correcciones`) | Analista asignado | Elige los documentos que la unidad debe corregir (por defecto todos los que estan en revision); los no marcados se consideran correctos y siguen en revision. Por cada elegido se crea `revisiones` (con_observaciones) + `observaciones` y pasa a CON_OBSERVACIONES; la unidad debe cargar una version nueva de cada uno para reenviar. El comentario es opcional; sin el se registra un texto generico. |
+| Validar documentacion | Analista asignado | Los documentos en revision pasan a APROBADO (`revisiones` aprobada + `aprobaciones`). El proceso pasa a PARA_LEGALIZAR. La regla `sin_observaciones_pendientes` impide validar con observaciones sin corregir. |
+
+- Las asignaciones de documento (`revisar` / `corregir`) que exige la BD se crean y se cierran automaticamente por el servicio.
+- **Reasignacion antes de autorizar la publicacion.** `asignaciones_proceso.desde_historial_id` (lo fija un trigger) indica en que punto del historial de estados se hizo la asignacion. La regla `asignacion_desde_estado_actual` de `autorizar_publicacion` exige una asignacion del analista posterior a la entrada del proceso en PARA_LEGALIZAR. Tras validar, el analista conserva el acceso de consulta, pero la accion "Autorizar publicacion" aparece solo cuando el Jefe de Compras lo asigna de nuevo (el mismo u otro). Reasignar al mismo analista en la misma etapa no duplica la asignacion.
+- En PARA_LEGALIZAR el analista no puede subir versiones (los documentos estan APROBADOS) ni editar el proceso.
+- **Pendiente (E2b):** la unidad sube los PDF firmados (legalizacion), el memorando y el formulario de solicitud de publicacion (numero de memorando manual y horas de cada publicacion); `autorizar_publicacion` exigira esos requisitos.
+
+### Ajustes posteriores a E2a
+
+- Con el proceso EN_CORRECCION solo la unidad requirente carga versiones; el analista no (tampoco con el proceso editable).
+- Al cargar un documento o una version desde la seccion Documentos se recarga la pagina del proceso, para que los botones superiores ("Enviar a revision", "Editar") se recalculen al instante.

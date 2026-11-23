@@ -77,7 +77,7 @@ class TransicionesProcesoTest extends TestCase
         $this->servicio->aplicarTransicion($p, $this->transicion('enviar_a_revision'), $unidad);
     }
 
-    public function test_solicitar_correcciones_exige_comentario(): void
+    public function test_remitir_observaciones_tiene_comentario_opcional(): void
     {
         $unidad = User::factory()->conRoles('UNIDAD_REQUIRENTE')->create();
         $analista = User::factory()->conRoles('COMPRAS_ANALISTA')->create();
@@ -88,14 +88,10 @@ class TransicionesProcesoTest extends TestCase
         $p = $p->fresh();
         $solicitar = $this->transicion('solicitar_correcciones');
 
-        try {
-            $this->servicio->aplicarTransicion($p, $solicitar, $analista);
-            $this->fail('Debio exigir el comentario');
-        } catch (DomainException $e) {
-            $this->assertStringContainsString('exige un comentario', $e->getMessage());
-        }
+        $this->assertSame('Remitir observaciones', $solicitar->nombre);
 
-        $this->servicio->aplicarTransicion($p, $solicitar, $analista, 'Falta firmar el informe');
+        // sin comentario tambien se puede remitir
+        $this->servicio->aplicarTransicion($p, $solicitar, $analista);
         $p = $p->fresh();
         $this->assertSame('EN_CORRECCION', $p->estadoProceso->codigo);
         $this->assertTrue($p->esEditable());
@@ -182,7 +178,10 @@ class TransicionesProcesoTest extends TestCase
 
         $this->servicio->aplicarTransicion($p, $this->transicion('enviar_a_revision'), $unidad);
         $this->servicio->aplicarTransicion($p->fresh(), $this->transicion('validar_documentacion'), $analista);
-        $this->servicio->aplicarTransicion($p->fresh(), $this->transicion('autorizar_publicacion'), $jefe);
+        // el analista que valido no autoriza hasta que el Jefe lo asigne de nuevo en esta etapa
+        $this->assertSame([], $this->servicio->transicionesDisponibles($p->fresh(), $analista)->pluck('codigo')->all());
+        $this->servicio->asignarAnalista($p->fresh(), $analista, $jefe);
+        $this->servicio->aplicarTransicion($p->fresh(), $this->transicion('autorizar_publicacion'), $analista);
 
         $p = $p->fresh();
         $this->assertSame('PARA_PUBLICAR', $p->estadoProceso->codigo);

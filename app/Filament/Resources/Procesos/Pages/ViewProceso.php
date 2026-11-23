@@ -4,10 +4,12 @@ namespace App\Filament\Resources\Procesos\Pages;
 
 use App\Filament\Resources\Procesos\ProcesoResource;
 use App\Models\User;
+use App\Services\ServicioDocumento;
 use App\Services\ServicioProceso;
 use DomainException;
 use Filament\Actions\Action;
 use Filament\Actions\EditAction;
+use Filament\Forms\Components\CheckboxList;
 use Filament\Forms\Components\Select;
 use Filament\Forms\Components\Textarea;
 use Filament\Notifications\Notification;
@@ -31,13 +33,11 @@ class ViewProceso extends ViewRecord
                 ->color($transicion->requiere_comentario ? 'warning' : 'primary')
                 ->modalHeading($transicion->nombre)
                 ->modalSubmitActionLabel('Confirmar')
-                ->schema([
-                    Textarea::make('comentario')
-                        ->label($transicion->requiere_comentario ? 'Comentario (obligatorio)' : 'Comentario (opcional)')
-                        ->required($transicion->requiere_comentario),
-                ])
+                ->schema($this->camposDeTransicion($transicion, $proceso))
                 ->action(function (array $data) use ($servicio, $proceso, $transicion, $usuario) {
-                    $this->ejecutar(fn () => $servicio->aplicarTransicion($proceso, $transicion, $usuario, $data['comentario'] ?? null),
+                    $this->ejecutar(fn () => $servicio->aplicarTransicion(
+                        $proceso, $transicion, $usuario, $data['comentario'] ?? null, ['documentos' => $data['documentos'] ?? null]
+                    ),
                         'Estado actualizado: '.$transicion->estadoDestino->nombre);
                 });
         }
@@ -76,6 +76,28 @@ class ViewProceso extends ViewRecord
         $acciones[] = EditAction::make();
 
         return $acciones;
+    }
+
+    /** Campos del formulario de una transicion: comentario y, al remitir observaciones, los documentos a corregir. */
+    private function camposDeTransicion($transicion, $proceso): array
+    {
+        $campos = [
+            Textarea::make('comentario')
+                ->label($transicion->requiere_comentario ? 'Comentario (obligatorio)' : 'Comentario (opcional)')
+                ->required($transicion->requiere_comentario),
+        ];
+
+        if ($transicion->codigo === 'solicitar_correcciones') {
+            $documentos = app(ServicioDocumento::class)->documentosEnRevision($proceso)->pluck('titulo', 'id');
+            array_unshift($campos, CheckboxList::make('documentos')
+                ->label('Documentos que la unidad debe corregir')
+                ->helperText('Marque solo los que tienen observaciones: la unidad deberá cargar una nueva versión de cada uno. Los no marcados se consideran correctos.')
+                ->options($documentos)
+                ->default($documentos->keys()->all())
+                ->required());
+        }
+
+        return $campos;
     }
 
     /** Ejecuta una accion del servicio y avisa del resultado; el error de negocio se muestra tal cual. */

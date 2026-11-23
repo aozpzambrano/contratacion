@@ -54,6 +54,11 @@ class Proceso extends Model
         return $this->hasMany(ProcesoItem::class, 'proceso_id')->orderBy('numero_linea');
     }
 
+    public function documentos(): HasMany
+    {
+        return $this->hasMany(Documento::class, 'proceso_id')->orderBy('id');
+    }
+
     public function asignaciones(): HasMany
     {
         return $this->hasMany(AsignacionProceso::class, 'proceso_id');

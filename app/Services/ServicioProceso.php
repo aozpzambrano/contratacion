@@ -20,6 +20,9 @@ use Illuminate\Support\Facades\DB;
  */
 class ServicioProceso
 {
+    /** Transiciones del proceso que envian a revision los documentos cargados. */
+    public const TRANSICIONES_QUE_ENVIAN_DOCUMENTOS = ['enviar_a_revision', 'reenviar_a_revision'];
+
     public function estaAsignado(Proceso $proceso, User $usuario): bool
     {
         return $proceso->asignaciones()->where('user_id', $usuario->id)->where('activo', true)->exists();
@@ -41,24 +44,57 @@ class ServicioProceso
             ->where('estado_origen_id', $proceso->estado_proceso_id)
             ->orderBy('id')
             ->get()
-            ->filter(function (TransicionProceso $t) use ($usuario, $asignado, $fase) {
+            ->filter(function (TransicionProceso $t) use ($proceso, $usuario, $asignado, $fase) {
                 $codigo = $t->permiso->codigo;
+
+                $rolReasignado = $t->validaciones['asignacion_desde_estado_actual'] ?? null;
 
                 return $usuario->tienePermiso($codigo)
                     && (! $t->permiso->requiere_asignacion || $asignado)
-                    && ($fase === null || $usuario->tienePermisoEnFase($codigo, $fase));
+                    && ($fase === null || $usuario->tienePermisoEnFase($codigo, $fase))
+                    // p. ej. "Autorizar publicacion": el Jefe debe haber vuelto a asignar al analista en esta etapa
+                    && ($rolReasignado === null || $this->tieneAsignacionDesdeEstado($proceso, $rolReasignado));
             })
             ->values();
     }
 
-    public function aplicarTransicion(Proceso $proceso, TransicionProceso $transicion, User $usuario, ?string $comentario = null): void
+    /**
+     * @param  array{documentos?: array<int>|null}  $opciones  documentos: ids con observaciones (solo "Remitir observaciones")
+     */
+    public function aplicarTransicion(Proceso $proceso, TransicionProceso $transicion, User $usuario, ?string $comentario = null, array $opciones = []): void
     {
         $comentario = filled($comentario) ? trim($comentario) : null;
 
-        $this->ejecutar(fn () => DB::select(
-            'select aplicar_transicion_proceso(?, ?, ?, ?)',
-            [$proceso->id, $transicion->codigo, $usuario->id, $comentario]
-        ));
+        $this->ejecutar(function () use ($proceso, $transicion, $usuario, $comentario, $opciones) {
+            DB::select(
+                'select aplicar_transicion_proceso(?, ?, ?, ?)',
+                [$proceso->id, $transicion->codigo, $usuario->id, $comentario]
+            );
+
+            // Los documentos acompanan al proceso en la misma transaccion: si algo falla, no queda nada a medias.
+            $documentos = app(ServicioDocumento::class);
+            match (true) {
+                // enviar / reenviar: borradores y corregidos pasan a "Pendiente de revision"
+                in_array($transicion->codigo, self::TRANSICIONES_QUE_ENVIAN_DOCUMENTOS, true)
+                    => $documentos->enviarDocumentosARevision($proceso, $usuario),
+                // remitir observaciones: los documentos en revision pasan a "Con observaciones"
+                $transicion->codigo === 'solicitar_correcciones'
+                    => $documentos->registrarObservaciones($proceso, $usuario, $comentario, $opciones['documentos'] ?? null),
+                // validar documentacion: los documentos en revision quedan aprobados
+                $transicion->codigo === 'validar_documentacion'
+                    => $documentos->aprobarDocumentos($proceso, $usuario),
+                default => null,
+            };
+        });
+    }
+
+    /** Hay una asignacion vigente del rol hecha despues de que el proceso entro en su estado actual. */
+    public function tieneAsignacionDesdeEstado(Proceso $proceso, string $rol, ?User $usuario = null): bool
+    {
+        return (bool) DB::selectOne(
+            'select proceso_tiene_asignacion_desde_estado(?, ?, ?) as ok',
+            [$proceso->id, $rol, $usuario?->id]
+        )->ok;
     }
 
     public function puedeGenerarCodigo(Proceso $proceso, User $usuario): bool
@@ -121,8 +157,13 @@ class ServicioProceso
         $faseId = $proceso->estadoMacro?->fase_id ?? Fase::where('codigo', 'PREPARATORIA')->value('id');
 
         DB::transaction(function () use ($proceso, $analista, $jefe, $rolId, $faseId) {
+            // Si el analista ya fue asignado en esta etapa no se duplica; si su asignacion es de una etapa
+            // anterior, se cierra y se abre otra (asi "Autorizar publicacion" exige la reasignacion del Jefe).
+            $yaVigente = $this->tieneAsignacionDesdeEstado($proceso, 'COMPRAS_ANALISTA', $analista);
+
             $proceso->asignaciones()
-                ->where('rol_id', $rolId)->where('activo', true)->where('user_id', '!=', $analista->id)
+                ->where('rol_id', $rolId)->where('activo', true)
+                ->when($yaVigente, fn ($query) => $query->where('user_id', '!=', $analista->id))
                 ->update([
                     'activo' => false,
                     // hora de la base y nunca anterior al inicio (restriccion fecha_fin >= fecha_inicio)
@@ -130,10 +171,7 @@ class ServicioProceso
                     'updated_at' => DB::raw('now()'),
                 ]);
 
-            $yaAsignado = $proceso->asignaciones()
-                ->where('rol_id', $rolId)->where('user_id', $analista->id)->where('activo', true)->exists();
-
-            if (! $yaAsignado) {
+            if (! $yaVigente) {
                 AsignacionProceso::create([
                     'proceso_id' => $proceso->id,
                     'user_id' => $analista->id,

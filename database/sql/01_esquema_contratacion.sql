@@ -195,8 +195,9 @@ CREATE TABLE tipos_documento (
     requiere_revision     boolean NOT NULL DEFAULT true,
     requiere_aprobacion   boolean NOT NULL DEFAULT true,
     requiere_legalizacion boolean NOT NULL DEFAULT false,
-    extensiones_permitidas varchar(100) NOT NULL DEFAULT 'pdf,doc,docx',
+    extensiones_permitidas varchar(100) NOT NULL DEFAULT 'pdf,doc,docx,xls,xlsx',
     tamano_maximo_mb      integer NOT NULL DEFAULT 20 CHECK (tamano_maximo_mb > 0),
+    permite_multiples     boolean NOT NULL DEFAULT false,  -- false: un solo documento (con sus versiones) por proceso
     activo                boolean NOT NULL DEFAULT true,
     created_at            timestamptz NOT NULL DEFAULT now(),
     updated_at            timestamptz NOT NULL DEFAULT now()
@@ -315,6 +316,9 @@ CREATE TABLE asignaciones_proceso (
     fecha_inicio  timestamptz NOT NULL DEFAULT now(),
     fecha_fin     timestamptz,
     activo        boolean NOT NULL DEFAULT true,
+    -- ultimo registro del historial de estados al asignar (lo fija un trigger): permite saber si la
+    -- asignacion es posterior a la entrada del proceso en su estado actual, sin depender de la hora
+    desde_historial_id bigint,
     created_at    timestamptz NOT NULL DEFAULT now(),
     updated_at    timestamptz NOT NULL DEFAULT now(),
     CHECK (fecha_fin IS NULL OR fecha_fin >= fecha_inicio)
@@ -731,6 +735,24 @@ END $$;
 CREATE TRIGGER documentos_hist_crear AFTER INSERT ON documentos
     FOR EACH ROW EXECUTE FUNCTION fn_hist_crear_documento();
 
+-- Un solo documento vigente por tipo y proceso (salvo tipos que permiten varios); los anulados no cuentan.
+-- Las correcciones se registran como versiones nuevas del mismo documento.
+CREATE FUNCTION fn_documento_unico_por_tipo() RETURNS trigger LANGUAGE plpgsql AS $$
+DECLARE v_t tipos_documento%ROWTYPE;
+BEGIN
+    SELECT * INTO v_t FROM tipos_documento WHERE id = NEW.tipo_documento_id;
+    IF NOT v_t.permite_multiples AND EXISTS (
+        SELECT 1 FROM documentos d JOIN estados_documento e ON e.id = d.estado_documento_id
+         WHERE d.proceso_id = NEW.proceso_id AND d.tipo_documento_id = NEW.tipo_documento_id
+           AND d.deleted_at IS NULL AND e.grupo <> 'anulado') THEN
+        RAISE EXCEPTION 'Ya existe un documento de tipo "%" en este proceso; cargue una nueva version', v_t.nombre
+            USING ERRCODE = 'unique_violation';
+    END IF;
+    RETURN NEW;
+END $$;
+CREATE TRIGGER documentos_unico_por_tipo BEFORE INSERT ON documentos
+    FOR EACH ROW EXECUTE FUNCTION fn_documento_unico_por_tipo();
+
 CREATE FUNCTION fn_hist_crear_oferta() RETURNS trigger LANGUAGE plpgsql AS $$
 DECLARE v_t bigint;
 BEGIN
@@ -809,6 +831,33 @@ LANGUAGE sql STABLE AS $$
      ORDER BY monto_minimo DESC LIMIT 1
 $$;
 
+CREATE FUNCTION fn_marcar_asignacion_estado() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+    IF NEW.desde_historial_id IS NULL THEN
+        SELECT max(id) INTO NEW.desde_historial_id FROM historial_estados_proceso WHERE proceso_id = NEW.proceso_id;
+    END IF;
+    RETURN NEW;
+END $$;
+CREATE TRIGGER asignaciones_proceso_marcar_estado BEFORE INSERT ON asignaciones_proceso
+    FOR EACH ROW EXECUTE FUNCTION fn_marcar_asignacion_estado();
+
+-- Hay una asignacion vigente (del rol, y del usuario si se indica) hecha despues de que el proceso
+-- entro en su estado actual. Asi el Jefe debe volver a asignar al analista en cada etapa que lo exija.
+CREATE FUNCTION proceso_tiene_asignacion_desde_estado(p_proceso bigint, p_rol text, p_user bigint DEFAULT NULL)
+RETURNS boolean LANGUAGE sql STABLE AS $$
+    SELECT EXISTS (
+        SELECT 1
+          FROM asignaciones_proceso a
+          JOIN roles ro ON ro.id = a.rol_id
+          JOIN procesos p ON p.id = a.proceso_id
+         WHERE a.proceso_id = p_proceso AND a.activo AND ro.codigo = p_rol
+           AND (p_user IS NULL OR a.user_id = p_user)
+           AND COALESCE(a.desde_historial_id, 0) >= COALESCE(
+                (SELECT max(h.id) FROM historial_estados_proceso h
+                  WHERE h.proceso_id = p_proceso AND h.estado_destino_id = p.estado_proceso_id), 0)
+    )
+$$;
+
 -- Reglas declarativas de transiciones de proceso. Devuelve el error o NULL.
 CREATE FUNCTION fn_validar_proceso(p_id bigint, p_reglas jsonb) RETURNS text
 LANGUAGE plpgsql STABLE AS $$
@@ -842,6 +891,9 @@ BEGIN
                             WHERE a.proceso_id = p_id AND a.activo AND ro.codigo = r.value #>> '{}') THEN
                 RETURN format('El proceso no tiene responsable asignado con el rol %s', r.value #>> '{}');
             END IF;
+        WHEN 'asignacion_desde_estado_actual' THEN
+            IF NOT proceso_tiene_asignacion_desde_estado(p_id, r.value #>> '{}') THEN
+                RETURN 'El Jefe de Compras debe asignar nuevamente al analista para esta etapa'; END IF;
         WHEN 'requiere_publicacion' THEN
             IF v_pubs = 0 THEN RETURN 'No existe una publicacion registrada en el ciclo actual'; END IF;
         WHEN 'ofertas_menor_a' THEN
@@ -1226,7 +1278,7 @@ SELECT DISTINCT r.id, p.id
     ('COMPRAS_JEFE','procesos.autorizar_transicion'),('COMPRAS_JEFE','documentos.descargar'),
     ('COMPRAS_JEFE','documentos.asignar_revisor'),
     ('COMPRAS_JEFE','reportes.%'),
-    ('COMPRAS_ANALISTA','%.ver'),('COMPRAS_ANALISTA','procesos.editar'),
+    ('COMPRAS_ANALISTA','%.ver'),
     ('COMPRAS_ANALISTA','procesos.autorizar_transicion'),('COMPRAS_ANALISTA','procesos.devolver'),('COMPRAS_ANALISTA','procesos.asignar_codigo'),
     ('COMPRAS_ANALISTA','procesos.reabrir'),('COMPRAS_ANALISTA','procesos.cerrar'),
     ('COMPRAS_ANALISTA','documentos.subir'),('COMPRAS_ANALISTA','documentos.descargar'),
@@ -1408,6 +1460,7 @@ SELECT m.codigo, m.nombre, f.id, e.id, rg.id, rr.id, m.rev, m.apr, m.leg
     ('CERTIFICACION_PRESUPUESTARIA','Certificacion presupuestaria','PREPARATORIA','DOCUMENTACION_COMPLEMENTARIA','UNIDAD_REQUIRENTE','COMPRAS_ANALISTA',true,true,false),
     ('AUTORIZACION_GASTO','Autorizacion de gasto','PREPARATORIA','DOCUMENTACION_COMPLEMENTARIA','UNIDAD_REQUIRENTE','COMPRAS_ANALISTA',true,true,false),
     ('DOCUMENTACION_COMPLEMENTARIA','Documentacion complementaria','PREPARATORIA','DOCUMENTACION_COMPLEMENTARIA','UNIDAD_REQUIRENTE','COMPRAS_ANALISTA',true,true,false),
+    ('MEMORANDO_SOLICITUD_PUBLICACION','Memorando de solicitud de publicacion','PREPARATORIA',NULL,'UNIDAD_REQUIRENTE',NULL,false,false,false),
     ('MEMORANDO_SOLICITUD_DESIGNACION','Memorando de solicitud de designacion','PRECONTRACTUAL','DESIGNACION','COMPRAS_ANALISTA',NULL,false,false,false),
     ('MEMORANDO_DESIGNACION','Memorando de designacion','PRECONTRACTUAL','DESIGNACION',NULL,NULL,false,false,false),
     ('PROFORMA','Proforma / oferta del proveedor','PRECONTRACTUAL','RECEPCION_OFERTAS',NULL,'COMPRAS_ANALISTA',false,false,false),
@@ -1425,6 +1478,12 @@ SELECT m.codigo, m.nombre, f.id, e.id, rg.id, rr.id, m.rev, m.apr, m.leg
   LEFT JOIN roles rg ON rg.codigo = m.generador
   LEFT JOIN roles rr ON rr.codigo = m.revisor;
 
+-- El memorando de solicitud de publicacion es solo PDF y hay uno por cada solicitud (ronda de publicacion).
+UPDATE tipos_documento SET extensiones_permitidas = 'pdf' WHERE codigo = 'MEMORANDO_SOLICITUD_PUBLICACION';
+-- Tipos que admiten varios documentos por proceso
+UPDATE tipos_documento SET permite_multiples = true
+ WHERE codigo IN ('MEMORANDO_SOLICITUD_PUBLICACION','DOCUMENTACION_COMPLEMENTARIA','PROFORMA','SOLICITUD_PAGO','OTROS');
+
 -- Transiciones de proceso
 INSERT INTO transiciones_proceso
   (estado_origen_id, estado_destino_id, codigo, nombre, estado_macro_destino_id, permiso_id, requiere_comentario, validaciones)
@@ -1432,10 +1491,10 @@ SELECT eo.id, ed.id, m.codigo, m.nombre, em.id, p.id, m.coment, m.reglas::jsonb
   FROM (VALUES
     (NULL,'INICIO','crear','Crear proceso','PREPARATORIA','procesos.crear',false,'{}'),
     ('INICIO','EN_REVISION','enviar_a_revision','Enviar a revision',NULL,'procesos.enviar_a_revision',false,'{}'),
-    ('EN_REVISION','EN_CORRECCION','solicitar_correcciones','Solicitar correcciones',NULL,'documentos.solicitar_correccion',true,'{}'),
-    ('EN_CORRECCION','EN_REVISION','reenviar_a_revision','Reenviar a revision',NULL,'procesos.enviar_a_revision',false,'{}'),
+    ('EN_REVISION','EN_CORRECCION','solicitar_correcciones','Remitir observaciones',NULL,'documentos.solicitar_correccion',false,'{}'),
+    ('EN_CORRECCION','EN_REVISION','reenviar_a_revision','Enviar a revision',NULL,'procesos.enviar_a_revision',false,'{}'),
     ('EN_REVISION','PARA_LEGALIZAR','validar_documentacion','Validar documentacion',NULL,'documentos.aprobar',false,'{"sin_observaciones_pendientes": true}'),
-    ('PARA_LEGALIZAR','PARA_PUBLICAR','autorizar_publicacion','Autorizar publicacion','PRECONTRACTUAL','procesos.autorizar_transicion',false,'{}'),
+    ('PARA_LEGALIZAR','PARA_PUBLICAR','autorizar_publicacion','Autorizar publicacion','PRECONTRACTUAL','procesos.autorizar_transicion',false,'{"asignacion_desde_estado_actual": "COMPRAS_ANALISTA"}'),
     ('PARA_PUBLICAR','PUBLICADO','publicar','Publicar',NULL,'publicaciones.registrar',false,'{"requiere_codigo": true, "requiere_responsable": "COMPRAS_ANALISTA", "requiere_publicacion": true}'),
     ('PUBLICADO','PUBLICADO','republicar','Republicar',NULL,'publicaciones.registrar',false,'{"ofertas_menor_a": "minimo_proformas"}'),
     ('PUBLICADO','PARA_COMISION','enviar_a_comision','Enviar a comision',NULL,'procesos.autorizar_transicion',false,'{"ofertas_para_comision": true}'),
