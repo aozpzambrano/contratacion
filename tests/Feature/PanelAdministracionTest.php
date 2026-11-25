@@ -3,6 +3,7 @@
 namespace Tests\Feature;
 
 use App\Filament\Resources\Roles\Pages\ListRoles;
+use App\Filament\Resources\TiposDocumento\Pages\CreateTipoDocumento;
 use App\Filament\Resources\Users\Pages\CreateUser;
 use App\Models\Rol;
 use App\Models\User;
@@ -61,5 +62,38 @@ class PanelAdministracionTest extends TestCase
     {
         $admin = User::factory()->conRoles('ADMIN')->create();
         $this->assertFalse($admin->can('delete', Rol::where('codigo', 'ADMIN')->first()));
+    }
+
+    public function test_tipos_de_documento_y_documentos_obligatorios_son_solo_del_administrador(): void
+    {
+        foreach (['COMPRAS_JEFE', 'COMPRAS_ANALISTA', 'UNIDAD_REQUIRENTE'] as $rol) {
+            $this->actingAs(User::factory()->conRoles($rol)->create());
+            $this->get('/admin/tipos-documento')->assertForbidden();
+            $this->get('/admin/documentos-obligatorios')->assertForbidden();
+        }
+
+        $this->actingAs(User::factory()->conRoles('ADMIN')->create());
+        $this->get('/admin/tipos-documento')->assertOk();
+        $this->get('/admin/documentos-obligatorios')->assertOk();
+    }
+
+    public function test_el_administrador_crea_un_tipo_de_documento(): void
+    {
+        $this->actingAs(User::factory()->conRoles('ADMIN')->create());
+
+        Livewire::test(CreateTipoDocumento::class)
+            ->fillForm([
+                'codigo' => 'CERTIFICADO_PRUEBA',
+                'nombre' => 'Certificado de prueba',
+                'extensiones_permitidas' => ['pdf'],
+                'tamano_maximo_mb' => 10,
+                'requiere_revision' => true,
+            ])
+            ->call('create')
+            ->assertHasNoFormErrors();
+
+        $this->assertDatabaseHas('tipos_documento', [
+            'codigo' => 'CERTIFICADO_PRUEBA', 'extensiones_permitidas' => 'pdf', 'permite_multiples' => false,
+        ]);
     }
 }

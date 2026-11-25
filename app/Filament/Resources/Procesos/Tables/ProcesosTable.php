@@ -18,7 +18,7 @@ class ProcesosTable
             ->columns([
                 TextColumn::make('id')->label('N.º')->sortable(),
                 TextColumn::make('codigo')->label('Código')->searchable()->placeholder('Sin asignar'),
-                TextColumn::make('descripcion_producto')->label('Descripción del producto')->limit(60)->searchable()->wrap(),
+                TextColumn::make('objeto_contratacion')->label('Objeto de contratación')->limit(60)->searchable()->wrap(),
                 TextColumn::make('estadoMacro.nombre')->label('Fase')->badge(),
                 TextColumn::make('estadoProceso.nombre')->label('Estado')->badge(),
                 TextColumn::make('ciclo')->label('Ciclo')->toggleable(),

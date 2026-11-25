@@ -2,13 +2,21 @@
 
 namespace App\Providers;
 
+use App\Models\Documento;
+use App\Models\DocumentoFijo;
 use App\Models\Permiso;
 use App\Models\Proceso;
+use App\Models\RequisitoTransicion;
 use App\Models\Rol;
+use App\Models\TipoDocumento;
 use App\Models\User;
+use App\Policies\DocumentoFijoPolicy;
+use App\Policies\DocumentoPolicy;
 use App\Policies\PermisoPolicy;
 use App\Policies\ProcesoPolicy;
+use App\Policies\RequisitoTransicionPolicy;
 use App\Policies\RolPolicy;
+use App\Policies\TipoDocumentoPolicy;
 use App\Policies\UserPolicy;
 use Filament\Support\Facades\FilamentTimezone;
 use Illuminate\Support\Facades\Gate;
@@ -30,6 +38,10 @@ class AppServiceProvider extends ServiceProvider
         Gate::policy(Rol::class, RolPolicy::class);
         Gate::policy(Permiso::class, PermisoPolicy::class);
         Gate::policy(Proceso::class, ProcesoPolicy::class);
+        Gate::policy(Documento::class, DocumentoPolicy::class);
+        Gate::policy(TipoDocumento::class, TipoDocumentoPolicy::class);
+        Gate::policy(DocumentoFijo::class, DocumentoFijoPolicy::class);
+        Gate::policy(RequisitoTransicion::class, RequisitoTransicionPolicy::class);
 
         // Habilidades con formato "modulo.accion" (p. ej. documentos.revisar) se resuelven
         // contra los permisos del usuario: @can('documentos.revisar'), $user->can(...), middleware can:...

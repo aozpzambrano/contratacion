@@ -103,7 +103,7 @@ erDiagram
 
 ```mermaid
 erDiagram
-    procesos ||--o{ publicaciones : "publica (1..2)"
+    procesos ||--o{ publicaciones : "publica (sin limite)"
     proveedores ||--o{ proveedor_alias : "alias"
     proveedores ||--o{ ofertas : "presenta"
     procesos ||--o{ ofertas : "recibe"
@@ -167,7 +167,7 @@ Notación: **PK**, *FK*, `U` único, `N` nullable. Se omiten `created_at`/`updat
 
 | Tabla | Columnas | Notas |
 |---|---|---|
-| `procesos` | `id`, `codigo` U, *tipo_proceso_id*, `descripcion_producto`, `codigo_cpc` N, *estado_macro_id*, *estado_proceso_id*, `observacion` N, *creado_por* (user_id), `deleted_at` N | `proceso_origen_id`: reproceso/reapertura (006 → 070). |
+| `procesos` | `id`, `codigo` U, *tipo_proceso_id*, `objeto_contratacion`, `codigo_cpc` N, *estado_macro_id*, *estado_proceso_id*, `observacion` N, *creado_por* (user_id), `deleted_at` N | `proceso_origen_id`: reproceso/reapertura (006 → 070). |
 | `proceso_items` | `id`, *proceso_id*, `numero_linea`, `cum`, `descripcion`, `cantidad` bigint | U(`proceso_id`,`numero_linea`). Líneas de producto. |
 | `precios_referenciales` | `id`, *proceso_item_id*, *proveedor_id* N, `fuente`, `precio_unitario` | Excel "PRECIOS MSP" (K, L). `fuente` por confirmar. |
 | `asignaciones_proceso` | `id`, *proceso_id*, *user_id*, *rol_id*, *fase_id*, *etapa_id* N, *actividad_id* N, *asignado_por*, `fecha_inicio`, `fecha_fin` N, `activo` | Quién interviene en cada fase/etapa del proceso. Base del control "por responsable". |
@@ -214,8 +214,8 @@ Notación: **PK**, *FK*, `U` único, `N` nullable. Se omiten `created_at`/`updat
 | A (Item) | Descartada: es un contador; el identificador es `procesos.codigo`. |
 | B | `procesos.codigo` |
 | C | `procesos.codigo_cpc` |
-| D | `procesos.descripcion_producto` |
-| E | `proceso_items.detalle` |
+| D | `procesos.objeto_contratacion` |
+| E | `proceso_items.descripcion` |
 | F | `proceso_items.cum` |
 | G | `proceso_items.cantidad` |
 | H | `estados_proceso` (mapeo en §5) |
@@ -227,7 +227,7 @@ Notación: **PK**, *FK*, `U` único, `N` nullable. Se omiten `created_at`/`updat
 | AC | Regla: `parametros.minimo_proformas` |
 | AD | `tipos_designacion` + `designaciones` |
 | AE, AF | `documentos.numero_documento` (memorandos) con `designacion_id` |
-| AG–AJ, AL–AO | `publicaciones` (secuencia 1 y 2) |
+| AG–AJ, AL–AO | `publicaciones` (1..n por ciclo, sin límite) |
 | AK, AP | Calculados: conteo de `ofertas` por publicación |
 | AQ–AV | `ordenes_compra` |
 | AW–BC | `entregas`, `entrega_items` |
@@ -270,14 +270,14 @@ Mapeo del Excel: `EN PROCESO` → según avance real del proceso; `PROCESO DEVUE
 |---|---|---|---|---|---|
 | 1 | ∅ → INICIO | `crear` | `procesos.crear` | Preparatoria | Evento inicio + "Seleccionar tipo de proceso". |
 | 2 | INICIO → EN_REVISION | `enviar_a_revision` | `procesos.enviar_a_revision` | — | Genera expediente preparatorio. Exige documentos del expediente cargados. |
-| 3 | EN_REVISION → EN_CORRECCION | `solicitar_correcciones` | `documentos.solicitar_correccion` | — | "Notificar observaciones". Comentario obligatorio. |
+| 3 | EN_REVISION → EN_CORRECCION | `solicitar_correcciones` | `documentos.solicitar_correccion` | — | Se rotula "Remitir observaciones". Comentario opcional. |
 | 4 | EN_CORRECCION → EN_REVISION | `reenviar_a_revision` | `procesos.enviar_a_revision` | — | Ciclo de corrección. Exige nueva versión de documentos observados. |
 | 5 | EN_REVISION → PARA_LEGALIZAR | `validar_documentacion` | `documentos.aprobar` | — | "¿Correcto y completo?" = sí. Sin observaciones pendientes. |
-| 6 | PARA_LEGALIZAR → PARA_PUBLICAR | `autorizar_publicacion` | `procesos.autorizar_transicion` | Precontractual | "Solicitar publicación". Documentos legalizados. |
+| 6 | PARA_LEGALIZAR → PARA_PUBLICAR | `autorizar_publicacion` | `procesos.autorizar_transicion` | (sin cambio: sigue Preparatoria) | "Solicitar publicación". Documentos legalizados. |
 | 7 | PARA_PUBLICAR → PUBLICADO | `publicar` | `publicaciones.registrar` | — | Exige responsable asignado y publicación registrada (NC). |
-| 8 | PUBLICADO → PUBLICADO | `republicar` | `publicaciones.registrar` | — | Si ofertas < mínimo y publicaciones < máximo. |
-| 9 | PUBLICADO → PARA_COMISION | `enviar_a_comision` | `procesos.autorizar_transicion` | — | Ofertas ≥ mínimo, o ≥ 1 tras agotar publicaciones. |
-| 10 | PUBLICADO → PARA_REAPERTURA | `devolver_expediente` | `procesos.autorizar_transicion` | — | 0 ofertas tras agotar publicaciones. "Memorando de devolución". |
+| 8 | PUBLICADO → PUBLICADO | `republicar` | `publicaciones.registrar` | — | Decisión `republicar` (ver §24): total de ofertas del ciclo < mínimo y quedan publicaciones por hacer. |
+| 9 | PUBLICADO → PARA_DOCUMENTACION | `remitir_ofertas` | `procesos.autorizar_transicion` | — | Decisión `remitir` (ver §24). Reemplaza a `enviar_a_comision`. |
+| 10 | PUBLICADO → PARA_REAPERTURA | `devolver_expediente` | `procesos.autorizar_transicion` | — | Decisión `devolver` (publicaciones agotadas y 0 ofertas) con Memorando e Informe de devolución legalizados (ver §24). |
 | 11 | PARA_COMISION → EN_COMISION | `iniciar_comision` | `designaciones.registrar` | — | Designación registrada (tipo según monto). |
 | 12 | EN_COMISION → APROBADO | `aprobar_seleccion` | `ofertas.seleccionar` | — | Oferta seleccionada y informe aprobado. |
 | 13 | EN_COMISION → PARA_REAPERTURA | `recomendar_devolucion` | `ofertas.evaluar` | — | "No existe proforma seleccionable". |
@@ -307,7 +307,6 @@ Transiciones: `cargar_version`, `asignar_revisor`, `iniciar_revision`, `registra
 | Clave | Valor | Origen |
 |---|---|---|
 | `minimo_proformas` | 3 | Excel AC. Bizagi: "número de ofertas solicitado". |
-| `maximo_publicaciones` | 2 | Excel (Publicación 1 y 2). **Por confirmar.** |
 | `tamano_maximo_documento_mb` | 20 | Propuesto. |
 
 Umbrales de designación (100.000 y 500.000) viven en `tipos_designacion.monto_minimo`: `DELEGADO` (0), `COMISION` (100.000), `COMISION_FINANCIERO_JURIDICO` (500.000).
@@ -451,3 +450,169 @@ Formato: `<prefijo del tipo>-<prefijo institucional>-<año>-<número>`, p. ej. `
 - La transición `publicar` exige que el proceso ya tenga código (regla `requiere_codigo`).
 - El código no se puede escribir ni cambiar a mano (trigger); al reabrir el proceso se conserva. La asignación queda en `auditoria`.
 - Se eliminan `procesos.anio` y `procesos.numero_pedido`. Las vistas calculan `anio_creacion` desde `created_at`.
+
+
+---
+
+## 14. Documentos requeridos y publicaciones (Entrega D2, definiciones)
+
+- **Enviar a revisión** (`enviar_a_revision` y `reenviar_a_revision`) exige dos documentos con al menos una versión cargada (archivo): **Informe de necesidad** y **Especificaciones técnicas**. Son documentos distintos y siguen el mismo flujo: revisión, aprobación y legalización. La legalización consiste en subir el PDF con firma electrónica. Los requisitos están en `transicion_proceso_requisitos` y se editan como dato. Los demás documentos del gráfico de Bizagi se incorporarán al avanzar en los flujos.
+- **Publicaciones:** no hay límite por ciclo (se elimina el parámetro `maximo_publicaciones`). Un proceso se republica mientras las ofertas sean menos que `minimo_proformas`.
+- **Pendiente (se retomará antes de la fase contractual):** si el proceso solo puede reabrirse dentro del año en curso y pasar a "Finalizado" al cambiar el año.
+
+---
+
+## 15. Acciones sobre el proceso (Entrega D2)
+
+En el detalle del proceso (`/admin/procesos/{id}`) el usuario ve solo los botones que le corresponden:
+
+| Botón | Quién lo ve | Regla |
+|---|---|---|
+| Transiciones del flujo (Enviar a revisión, Remitir observaciones, Validar documentación, Autorizar publicación…) | Quien tiene el permiso de la transición, opera en la fase actual con su rol y, si el permiso lo exige, está asignado al proceso | Se ejecuta con `aplicar_transicion_proceso()`. Si la transición exige comentario, el formulario lo pide. Los errores de la base (documentos faltantes, observaciones pendientes, etc.) se muestran tal cual. |
+| Generar código del proceso | Analista asignado, con `procesos.asignar_codigo` | Solo si el proceso no tiene código y está en un estado con `permite_asignar_codigo`. |
+| Asignar analista | Jefe de Compras (`procesos.asignar_responsables`), solo después de que la unidad requirente envíe el proceso a revisión (estados que no son inicial ni final) | Elige un analista activo. Hay un único analista responsable por proceso: asignar a otro reemplaza al actual. Queda en `auditoria` (`proceso.analista_asignado`). |
+
+La lógica está en `App\Services\ServicioProceso`; las pantallas solo la invocan. Las transiciones que dependen de módulos aún no construidos (publicaciones, ofertas, designaciones, órdenes de compra) aparecen con su permiso, pero la base responde con el requisito que falta hasta que existan esos módulos.
+
+## 16. Documentos (Etapa 7 - Entrega E1)
+
+- Los archivos se guardan en el disco privado `documentos` (`storage/app/private/documentos`), nunca con URL publica.
+  Ruta final: `procesos/{proceso}/documentos/{documento}/{uuid}.{ext}`; el nombre original solo vive en `archivos`.
+- Formatos: PDF, Word y Excel (`tipos_documento.extensiones_permitidas`, por defecto `pdf,doc,docx,xls,xlsx`).
+  La version legalizada (E2) debe ser PDF. Los PDF se verifican por su cabecera `%PDF-`.
+- Tamano maximo: el menor entre el parametro `tamano_maximo_documento_mb` (20) y `tipos_documento.tamano_maximo_mb`.
+  `docker/php/uploads.ini` sube los limites de PHP a 25 MB para que el parametro sea el que decida.
+- Cada carga crea un documento en BORRADOR con su version 1; cada nueva version la numera la BD (`fn_numerar_version`)
+  y pasa a ser la vigente. Solo se agregan versiones en BORRADOR o EN_CORRECCION.
+- Quien carga: la unidad requirente mientras el proceso es editable (INICIO / EN_CORRECCION); despues, solo el
+  analista asignado. Tipos disponibles: los de la fase actual cuyo rol generador tiene el usuario.
+- Al aplicar `enviar_a_revision` o `reenviar_a_revision` al proceso, en la misma transaccion los documentos en
+  BORRADOR (con version y que exigen revision) pasan a PENDIENTE_REVISION (`aplicar_transicion_documento`).
+- Descarga: ruta `documentos.descargar`, exige `documentos.descargar` y que el proceso sea visible para el usuario;
+  siempre como adjunto y con evento `documento.descargado` en `auditoria`.
+- Pendiente (E2): asignar revisor, observaciones, correcciones, aprobacion y legalizacion (PDF firmado).
+
+## 17. Ajustes a documentos (Entrega E1.1)
+
+- **Un documento por tipo y proceso.** El trigger `documentos_unico_por_tipo` rechaza un segundo documento vigente (no anulado) del mismo tipo salvo que `tipos_documento.permite_multiples` sea `true` (memorando de solicitud de publicacion, documentacion complementaria, proformas, solicitud de pago, otros). Las correcciones son versiones del mismo documento; al legalizar (E2) el PDF firmado quedara como la version legalizada del mismo registro.
+- **Descarga.** Solo la ultima version (la vigente) se descarga; las anteriores se listan en "Versiones" como registro de respaldo.
+- **Quien sube versiones.**
+  - Unidad requirente: documento en BORRADOR, CON_OBSERVACIONES o EN_CORRECCION y proceso editable.
+  - Analista de Compras asignado: documento en PENDIENTE_REVISION, EN_REVISION, CON_OBSERVACIONES o EN_CORRECCION; el estado del documento se conserva. La accion se rotula "Subir documento" para el analista y "Nueva version" para la unidad.
+- **Analista y proceso.** El analista ya no tiene `procesos.editar`: no modifica los datos del proceso ni sus items (solo la unidad requirente). Ve los documentos al abrir el proceso ("Ver").
+- **Reenvio.** La transicion `reenviar_a_revision` se rotula "Enviar a revision". Al aplicarla, los documentos CON_OBSERVACIONES / EN_CORRECCION vuelven a PENDIENTE_REVISION (la asignacion de correccion se crea y cierra automaticamente hasta que E2 registre observaciones con su propio flujo).
+- **Tipo nuevo.** `MEMORANDO_SOLICITUD_PUBLICACION` (PREPARATORIA, rol generador UNIDAD_REQUIRENTE, solo PDF, admite varios: uno por cada solicitud de publicacion).
+- **Administracion (solo ADMIN, grupo "Administracion").**
+  - `Tipos de documento` (`/admin/tipos-documento`, permiso `catalogos.editar`): crear/editar tipos, formatos, tamano, roles, flujo. No se eliminan, se desactivan.
+  - `Documentos obligatorios` (`/admin/documentos-obligatorios`, permiso `flujos.editar`): que documentos exige cada transicion del proceso (tabla `transicion_proceso_requisitos`). La BD los valida en `aplicar_transicion_proceso()`.
+  - Las politicas exigen `*.editar` incluso para listar, porque otros roles tienen `catalogos.ver` / `flujos.ver`.
+- **Pendiente para E2:** revision, observaciones, validacion ("Para legalizar"), legalizacion con PDF firmado, solicitud de publicacion (numero de memorando manual y horas de cada publicacion) y la reasignacion del analista antes de autorizar la publicacion.
+
+## 18. Revision y validacion de la documentacion (Entrega E2a)
+
+Las acciones del proceso arrastran a sus documentos en la misma transaccion (`ServicioProceso::aplicarTransicion` + `ServicioDocumento`):
+
+| Accion del proceso | Quien | Efecto en los documentos |
+|---|---|---|
+| Enviar / Reenviar a revision | Unidad requirente | BORRADOR -> PENDIENTE_REVISION. En el reenvio, los documentos CON_OBSERVACIONES exigen una version posterior a la observada; se registra la `correccion` y vuelven a PENDIENTE_REVISION. |
+| Remitir observaciones (`solicitar_correcciones`) | Analista asignado | Elige los documentos que la unidad debe corregir (por defecto todos los que estan en revision); los no marcados se consideran correctos y siguen en revision. Por cada elegido se crea `revisiones` (con_observaciones) + `observaciones` y pasa a CON_OBSERVACIONES; la unidad debe cargar una version nueva de cada uno para reenviar. El comentario es opcional; sin el se registra un texto generico. |
+| Validar documentacion | Analista asignado | Los documentos en revision pasan a APROBADO (`revisiones` aprobada + `aprobaciones`). El proceso pasa a PARA_LEGALIZAR. La regla `sin_observaciones_pendientes` impide validar con observaciones sin corregir. |
+
+- Las asignaciones de documento (`revisar` / `corregir`) que exige la BD se crean y se cierran automaticamente por el servicio.
+- **Reasignacion antes de autorizar la publicacion.** `asignaciones_proceso.desde_historial_id` (lo fija un trigger) indica en que punto del historial de estados se hizo la asignacion. La regla `asignacion_desde_estado_actual` de `autorizar_publicacion` exige una asignacion del analista posterior a la entrada del proceso en PARA_LEGALIZAR. Tras validar, el analista conserva el acceso de consulta, pero la accion "Autorizar publicacion" aparece solo cuando el Jefe de Compras lo asigna de nuevo (el mismo u otro). Reasignar al mismo analista en la misma etapa no duplica la asignacion.
+- En PARA_LEGALIZAR el analista no puede subir versiones (los documentos estan APROBADOS) ni editar el proceso.
+- La legalizacion y la solicitud de publicacion se describen en la seccion 19 (E2b).
+
+### Ajustes posteriores a E2a
+
+- Con el proceso EN_CORRECCION solo la unidad requirente carga versiones; el analista no (tampoco con el proceso editable).
+- Al cargar un documento o una version desde la seccion Documentos se recarga la pagina del proceso, para que los botones superiores ("Enviar a revision", "Editar") se recalculen al instante.
+
+## 19. Legalizacion y solicitud de publicacion (Entrega E2b)
+
+En PARA_LEGALIZAR la unidad requirente ve **"Remitir documentos legalizados"**, un unico formulario con:
+los PDF firmados electronicamente de cada documento que exige legalizacion (Informe de necesidad y Especificaciones tecnicas), el memorando de solicitud de publicacion (PDF), el **numero del memorando** (manual) y el **numero de publicaciones** con la **duracion en HORAS de cada una** (24 h = 1 dia). Maximo 5 publicaciones, 1 a 8760 horas cada una.
+
+**Tablas nuevas**
+- `solicitudes_publicacion`: una por remision (`ciclo` lo fija un trigger), `numero_memorando`, `memorando_documento_id`, `estado` (`remitida` | `devuelta`), quien y cuando remitio / devolvio y el motivo. Indice unico parcial: solo una `remitida` por proceso.
+- `solicitud_publicacion_detalle`: `numero_publicacion` y `horas`. La cantidad de filas es el tope que se valida en la fase contractual ("el numero de publicacion es menor o igual al solicitado").
+- `legalizaciones` (ya existia) guarda el PDF firmado (`archivo_id`) sobre la version vigente del documento.
+
+**Transiciones y reglas**
+- `remitir_legalizados` (PARA_LEGALIZAR -> PARA_LEGALIZAR, `procesos.remitir_legalizados`, unidad requirente asignada). Reglas `requiere_documentos_legalizados` y `requiere_solicitud_publicacion`. Es una auto-transicion: escribe un movimiento de historial que invalida la asignacion previa del analista, por lo que el Jefe debe asignarlo de nuevo.
+- `devolver_legalizacion` (mismo estado, `procesos.devolver_legalizacion`, Jefe y analista, comentario obligatorio): la solicitud queda `devuelta` y los documentos vuelven de LEGALIZADO a APROBADO (transicion de documento `devolver_legalizacion`) para que la unidad cargue de nuevo la documentacion. El analista solo la ve cuando el Jefe lo asigno de nuevo en la etapa (regla de pantalla en `ServicioProceso`).
+- `autorizar_publicacion` ahora exige documentos legalizados + solicitud remitida + reasignacion del analista.
+- Las acciones `devolver_legalizacion` y `autorizar_publicacion` se ocultan mientras no exista una solicitud remitida; `remitir_legalizados` se oculta cuando ya existe una.
+
+**Servicios**: `ServicioLegalizacion::remitir()` ejecuta todo en una transaccion (legaliza, crea el memorando como documento, registra solicitud y horas, aplica la transicion) y, si algo falla, no queda nada a medias ni archivos huerfanos. Solo la ultima version legalizada se descarga (`documentos.descargar_legalizado`); las anteriores quedan como respaldo.
+
+**Nueva ronda (re-publicacion)**: el Informe y las Especificaciones siguen LEGALIZADOS y no se piden de nuevo; se registra un nuevo memorando y sus datos (nueva solicitud con otro ciclo). La reapertura se construye en una entrega posterior.
+
+**Supuestos**: tope de 5 publicaciones en el formulario; el memorando de una solicitud devuelta queda como historial (la nueva remision crea otro); el Expediente preparatorio ya no exige legalizacion.
+
+## 20. Ajustes posteriores a E2b (E2c)
+
+- **Nombres:** `procesos.descripcion_producto` -> `procesos.objeto_contratacion` ("Objeto de contratacion") y `proceso_items.detalle` -> `proceso_items.descripcion` ("Descripcion"), en esquema, vistas, codigo y pruebas.
+- **Flujo de publicacion:** la unidad remite (el proceso sigue en Para legalizar) y el Jefe asigna al analista; al asignarlo, el proceso pasa **solo** a *Para publicar* y se genera el numero `PE-AILEP-AAAA-NNN` (`ServicioProceso::publicarAlAsignar`). "Autorizar publicacion" deja de ser un boton; la transicion sigue existiendo y queda registrada a nombre del analista con el comentario "Automatico: ...". Si el proceso ya tiene numero (reproceso por devolucion), se conserva.
+- **Devolver:** `devolver_legalizacion` (Para legalizar, Jefe/analista reasignado) y `devolver_publicacion` (Para publicar -> Para legalizar, Jefe/analista, comentario obligatorio). Ambas dejan la solicitud `devuelta` y los documentos legalizados vuelven a APROBADO.
+- **Documentos que acompanan al memorando** (nuevos tipos, PDF, varios por tipo, sin revision): Fichas tecnicas, Certificado de no catalogado, Validacion de firmas electronicas, Autorizacion del requerimiento. Se cargan en el mismo formulario de "Remitir documentos legalizados" (solo los que el proceso aun no tiene) y son *Documentos obligatorios* de la transicion `remitir_legalizados` (editables por el administrador); si falta alguno la base informa cuales.
+- Maximo 5 publicaciones en el formulario.
+
+## 21. Flujo de legalizacion y devolucion (Entrega E2d)
+
+Estados nuevos: **LEGALIZADO** y **PARA_REVISION**. Flujo:
+
+1. `PARA_LEGALIZAR` -> la unidad pulsa **Remitir documentos legalizados** (`remitir_legalizados`) -> `LEGALIZADO`.
+2. El Jefe asigna al analista -> pasa solo a `PARA_PUBLICAR` (`autorizar_publicacion`, automatica) y se genera el numero `PE-AILEP-AAAA-NNN`.
+3. **Devolver a la unidad requirente** (`devolver_legalizacion` desde LEGALIZADO por el Jefe; `devolver_publicacion` desde PARA_PUBLICAR por Jefe o analista; comentario obligatorio) -> `PARA_REVISION`.
+4. En `PARA_REVISION` la unidad solo puede cargar, versionar o eliminar documentos de los tipos con `tipos_documento.editable_tras_devolucion` (por defecto Fichas tecnicas, Certificado de no catalogado y Autorizacion del requerimiento; el administrador lo configura en *Tipos de documento*). No modifica el proceso, los items, los PDF legalizados, el memorando ni los datos de la solicitud.
+5. La unidad pulsa **Remitir** (`remitir_correccion`) -> `LEGALIZADO`; la base vuelve a exigir los documentos obligatorios. El numero del proceso se conserva y no se pide un memorando nuevo.
+
+La solicitud de publicacion (memorando y horas) permanece `remitida` durante las devoluciones. El tipo "Expediente preparatorio" se elimino del catalogo de tipos de documento.
+
+
+## 22. Documentos fijos, expediente de publicación y publicación (Entrega E3)
+
+**Documentos fijos por tipo de proceso** (`documentos_fijos`, `documentos_fijos_versiones`): Reglamento Interno (PDF), Proyecto Orden de Compra (Word), Anexo Vinculaciones (Word) y Anexo I Formulario Perfil Integridad Proveedor (Word, **plantilla**). El administrador (permiso `catalogos.editar`) los reemplaza en *Administración → Documentos fijos del proceso → Editar → Nuevo archivo*. Cada reemplazo crea una versión nueva (el archivo anterior queda como respaldo y se puede descargar desde el historial). La plantilla debe conservar `{{objeto_contratacion}}` y `{{numero_proceso}}`; si falta alguno el sistema rechaza el archivo. `migrate:fresh --seed` carga los archivos iniciales (`database/seeders/documentos_fijos/`) con `DocumentosFijosSeeder`, sin pisar lo que el administrador ya haya reemplazado.
+
+**Visibilidad**: los ven el Jefe y el analista de Compras (permiso `expedientes.generar_publicacion`) cuando el proceso está en *Legalizado*, *Para publicar* o posterior; no la unidad requirente y no mientras el proceso está devuelto (*Para revisión*). En la pantalla del proceso, botón *Documentos fijos*; la plantilla se descarga en Word con el objeto de contratación y el número del proceso.
+
+**Generar Expediente Publicación** (`ServicioExpedientePublicacion`): botón junto a *Subir documento*. Lista los documentos vigentes del proceso (el PDF legalizado si lo tienen) y los fijos; vienen marcados todos salvo *Validación de firmas electrónicas* y *Autorización del requerimiento*. Descarga un `.zip` numerado.
+
+**Publicación** (`ServicioPublicacion`, tabla `publicaciones`): el analista asignado, en *Para publicar*, pulsa *Publicar* y registra Necesidad de Contratación Publicación (obligatoria, hasta 60 caracteres; es el código de la necesidad, `publicaciones.codigo_nc`), Link de Publicación y Fecha de Publicación / Fecha Límite (fecha y hora, `timestamptz`; la límite ≥ la de publicación). El proceso pasa a *Publicado*. El tope de publicaciones es el número que pidió la unidad en la solicitud; lo impone el disparador `publicaciones_limite`.
+
+**Pendiente para la siguiente entrega**: botón *Ofertas*, decisión «¿Se cumplió el número de ofertas?» (≥ 3) y «¿El número de publicación es menor o igual que el solicitado?» (vuelve a habilitar *Publicar*).
+
+## 23. Ofertas (Entrega E3b)
+
+Tras publicar, el analista asignado ve el botón **Ofertas** (permiso `ofertas.registrar`). Indica el número de ofertas (1–20) y, por cada una, RUC/cédula, razón social y el **precio unitario de todos los ítems** del proceso; el total del ítem (cantidad × precio) y el total del proceso se calculan en pantalla y se muestran en la sección *Ofertas*. Las ofertas quedan asociadas a la última publicación y se registran una sola vez por publicación (`ofertas`, `oferta_items`, estado inicial *Recibida*; se admite registrar 0 ofertas y queda constancia en `publicaciones.ofertas_registradas_en`). `proveedores.ruc` acepta ahora 10 dígitos (cédula) o 13 (RUC); un proveedor ya registrado se reutiliza.
+
+Decisiones tras registrar las ofertas (parámetro `minimo_proformas` = 3):
+Tras publicar solo aparece **Ofertas**; los botones de decisión se habilitan **después** de registrarlas.
+- Con **3 o más** ofertas en el ciclo se muestra **Remitir ofertas** (transición `remitir_ofertas`; la fase sigue siendo Preparatoria hasta la comisión técnica; ver §24) y no *Publicar*.
+- Con **menos de 3**, si las publicaciones hechas son **menos** que las que solicitó la unidad (filas de `solicitud_publicacion_detalle`), *Publicar* se habilita otra vez (transición `republicar`, los datos de la nueva publicación se guardan con su secuencia). Si ya se hicieron todas, no se habilita.
+
+`publicaciones.codigo_nc` ("Necesidad de Contratación Publicación") es un código de hasta 60 caracteres.
+
+**Actualización E4:** el mínimo cuenta el total de ofertas de todas las publicaciones del ciclo y el caso de publicaciones agotadas se define en §24.
+
+## 24. Decisiones tras las ofertas, documentación y re-publicación (Entrega E4)
+
+**Decisión del flujo** (función `decision_ofertas_proceso`, regla `decision_ofertas` de las transiciones). Se calcula solo cuando las ofertas de la **última publicación** del ciclo ya se registraron, con el **total de ofertas de todas las publicaciones del ciclo** y el mínimo `minimo_proformas` (3):
+
+1. total ≥ mínimo → `remitir` ("Remitir ofertas").
+2. si no, publicaciones hechas < solicitadas por la unidad → `republicar` ("Publicar" otra vez, con todos los datos de la publicación).
+3. si no, total > 0 → `remitir`.
+4. si no (0 ofertas) → `devolver`.
+
+**Remitir ofertas** (`remitir_ofertas`) pasa el proceso a **Para documentación** (unidad requirente). La unidad carga **Estudio de Mercado** y **Certificación POA** (un PDF legalizado cada uno) y los remite (`remitir_documentacion`) a **Para comisión** (Compras). La fase **Precontractual** empieza en la designación y convocatoria de la Comisión Técnica (`iniciar_comision`).
+
+**Devolución sin ofertas.** El analista asignado sube el **Memorando de devolución** y el **Informe de devolución por falta de ofertas** (PDF ya legalizados; permiso nuevo `documentos.registrar_legalizado`, transición de documento `registrar_legalizado` APROBADO → LEGALIZADO). Una sola acción registra la devolución, aplica `devolver_expediente` y `reabrir`, cierra el ciclo (ciclo + 1) y marca la solicitud de publicación como *devuelta*. El proceso queda en **Para Re-publicar** (`PARA_REPUBLICAR`), que funciona igual que *Para legalizar* con otra etiqueta: la unidad remite (`remitir_republicacion`) nuevo memorando, horas y número de publicaciones; los documentos ya legalizados y el código PE-AILEP se conservan. `reabrir` ahora termina siempre en Para Re-publicar (también para la devolución recomendada por la comisión).
+
+**Documentos fijos.** Se ocultan mientras el proceso está en la unidad (Inicio, En revisión, En corrección, Para revisión, Para legalizar, Para Re-publicar, Para reapertura); el resto de estados los muestra.
+
+## 25. Distributivo y expediente de publicación en carpetas (Entrega E4b)
+
+**Distributivo.** Nuevo tipo de documento (`DISTRIBUTIVO`, PDF, Word o Excel, admite varios por proceso, sin revisión ni legalización). La unidad lo adjunta —uno o varios archivos, opcional— en el modal de *Remitir documentos legalizados* (también al remitir en Para Re-publicar). Si se quiere obligatorio basta agregarlo a los "Documentos obligatorios" de la transición (`remitir_legalizados`, `remitir_correccion`, `remitir_republicacion`).
+
+**Generar Expediente Publicación.** El zip agrupa los documentos del proceso en carpetas por tipo: `01. Informe de Necesidad`, `02. Especificaciones Técnicas`, `03. Distributivo`, `04. Fichas`, `05. Certificado de no catalogado`, `06. Validación de Firmas`, `07. Autorización del Requerimiento`. El memorando de solicitud de publicación, los demás documentos y los documentos fijos van sueltos, sin numeración y sin carpeta. El mapa está en `ServicioExpedientePublicacion::CARPETAS`.

@@ -20,7 +20,7 @@ class Proceso extends Model
      * solo cambian con las transiciones (aplicar_transicion_proceso) y un trigger lo impone.
      */
     protected $fillable = [
-        'tipo_proceso_id', 'descripcion_producto', 'codigo_cpc', 'observacion',
+        'tipo_proceso_id', 'objeto_contratacion', 'codigo_cpc', 'observacion',
     ];
 
     /** Roles que ven todos los procesos. El resto ve solo los asignados (y la unidad requirente, los que creo). */
@@ -54,9 +54,39 @@ class Proceso extends Model
         return $this->hasMany(ProcesoItem::class, 'proceso_id')->orderBy('numero_linea');
     }
 
+    public function documentos(): HasMany
+    {
+        return $this->hasMany(Documento::class, 'proceso_id')->orderBy('id');
+    }
+
     public function asignaciones(): HasMany
     {
         return $this->hasMany(AsignacionProceso::class, 'proceso_id');
+    }
+
+    public function solicitudesPublicacion(): HasMany
+    {
+        return $this->hasMany(SolicitudPublicacion::class, 'proceso_id')->orderByDesc('id');
+    }
+
+    /** Solicitud de publicacion remitida y vigente (la unidad ya remitio y nadie la devolvio). */
+    public function solicitudRemitida(): ?SolicitudPublicacion
+    {
+        return $this->solicitudesPublicacion()->where('estado', 'remitida')->with(['detalle', 'memorando', 'remitente'])->first();
+    }
+
+    public function publicaciones(): HasMany
+    {
+        return $this->hasMany(Publicacion::class, 'proceso_id')->where('ciclo', $this->ciclo)->orderBy('secuencia');
+    }
+
+    /** Ofertas del ciclo actual (de todas las publicaciones). */
+    public function ofertas(): HasMany
+    {
+        return $this->hasMany(Oferta::class, 'proceso_id')
+            ->whereNull('deleted_at')
+            ->whereIn('publicacion_id', Publicacion::query()->where('proceso_id', $this->id)->where('ciclo', $this->ciclo)->select('id'))
+            ->orderBy('id');
     }
 
     public function historial(): HasMany

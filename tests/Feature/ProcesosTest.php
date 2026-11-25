@@ -3,45 +3,20 @@
 namespace Tests\Feature;
 
 use App\Filament\Resources\Procesos\Pages\CreateProceso;
-use App\Models\AsignacionProceso;
-use App\Models\EstadoMacro;
 use App\Models\EstadoProceso;
-use App\Models\Fase;
 use App\Models\Proceso;
-use App\Models\Rol;
 use App\Models\TipoProceso;
 use App\Models\User;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\DB;
 use Livewire\Livewire;
+use Tests\Feature\Concerns\CreaProcesos;
 use Tests\TestCase;
 
 class ProcesosTest extends TestCase
 {
     use RefreshDatabase;
-
-    private function proceso(User $creador, string $descripcion = 'Medicamentos de prueba'): Proceso
-    {
-        $p = new Proceso(['tipo_proceso_id' => TipoProceso::value('id'), 'descripcion_producto' => $descripcion]);
-        $p->forceFill([
-            'creado_por' => $creador->id,
-            'estado_macro_id' => EstadoMacro::where('codigo', 'PREPARATORIA')->value('id'),
-            'estado_proceso_id' => EstadoProceso::where('codigo', 'INICIO')->value('id'),
-        ])->save();
-
-        return $p;
-    }
-
-    private function asignar(Proceso $p, User $usuario, string $rol, User $por): void
-    {
-        AsignacionProceso::create([
-            'proceso_id' => $p->id,
-            'user_id' => $usuario->id,
-            'rol_id' => Rol::where('codigo', $rol)->value('id'),
-            'fase_id' => Fase::where('codigo', 'PREPARATORIA')->value('id'),
-            'asignado_por' => $por->id,
-        ]);
-    }
+    use CreaProcesos;
 
     public function test_la_unidad_requirente_crea_un_proceso_con_items(): void
     {
@@ -51,8 +26,8 @@ class ProcesosTest extends TestCase
         Livewire::test(CreateProceso::class)
             ->fillForm([
                 'tipo_proceso_id' => TipoProceso::value('id'),
-                'descripcion_producto' => 'Adquisicion de medicamentos',
-                'items' => [['cum' => '12345-1', 'cantidad' => 10, 'detalle' => 'Paracetamol 500 mg']],
+                'objeto_contratacion' => 'Adquisicion de medicamentos',
+                'items' => [['cum' => '12345-1', 'cantidad' => 10, 'descripcion' => 'Paracetamol 500 mg']],
             ])
             ->call('create')
             ->assertHasNoFormErrors();
@@ -114,20 +89,38 @@ class ProcesosTest extends TestCase
         Livewire::test(CreateProceso::class)
             ->fillForm([
                 'tipo_proceso_id' => TipoProceso::value('id'),
-                'descripcion_producto' => 'Proceso a enviar',
-                'items' => [['cum' => '1', 'cantidad' => 1, 'detalle' => 'x']],
+                'objeto_contratacion' => 'Proceso a enviar',
+                'items' => [['cum' => '1', 'cantidad' => 1, 'descripcion' => 'x']],
             ])
             ->call('create');
 
         $p = Proceso::firstOrFail();
         $this->assertTrue($unidad->can('update', $p->fresh()));
 
+        $this->cargarDocumento($p, 'INFORME_NECESIDAD', $unidad);
+        $this->cargarDocumento($p, 'ESPECIFICACIONES_TECNICAS', $unidad);
         DB::select('select aplicar_transicion_proceso(?, ?, ?, ?)', [$p->id, 'enviar_a_revision', $unidad->id, null]);
 
         $p = $p->fresh();
         $this->assertSame('EN_REVISION', $p->estadoProceso->codigo);
         $this->assertSame(2, $p->historial()->count());
         $this->assertFalse($unidad->can('update', $p));
+    }
+
+    public function test_enviar_a_revision_exige_informe_y_especificaciones_con_archivo(): void
+    {
+        $unidad = User::factory()->conRoles('UNIDAD_REQUIRENTE')->create();
+        $p = $this->proceso($unidad);
+        $this->asignar($p, $unidad, 'UNIDAD_REQUIRENTE', $unidad);
+
+        $enviar = fn () => DB::select('select aplicar_transicion_proceso(?, ?, ?, ?)', [$p->id, 'enviar_a_revision', $unidad->id, null]);
+
+        try {
+            $enviar();
+            $this->fail('Debio exigir los documentos');
+        } catch (\Illuminate\Database\QueryException $e) {
+            $this->assertStringContainsString('Faltan documentos requeridos', $e->getMessage());
+        }
     }
 
     public function test_el_estado_no_se_puede_cambiar_por_update_directo(): void
