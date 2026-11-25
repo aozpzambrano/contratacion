@@ -23,6 +23,12 @@ class ServicioProceso
     /** Transiciones del proceso que envian a revision los documentos cargados. */
     public const TRANSICIONES_QUE_ENVIAN_DOCUMENTOS = ['enviar_a_revision', 'reenviar_a_revision'];
 
+    /**
+     * Transiciones que el analista (si no es Jefe) solo ve una vez que el Jefe lo asigno de nuevo en la etapa:
+     * hasta entonces conserva solo "ver" del proceso.
+     */
+    public const TRANSICIONES_DEL_ANALISTA_TRAS_REASIGNACION = ['devolver_legalizacion'];
+
     public function estaAsignado(Proceso $proceso, User $usuario): bool
     {
         return $proceso->asignaciones()->where('user_id', $usuario->id)->where('activo', true)->exists();
@@ -47,7 +53,18 @@ class ServicioProceso
             ->filter(function (TransicionProceso $t) use ($proceso, $usuario, $asignado, $fase) {
                 $codigo = $t->permiso->codigo;
 
+                // "Autorizar publicacion" ya no es un boton: ocurre al asignar el analista (ver asignarAnalista).
+                if ($t->codigo === 'autorizar_publicacion') {
+                    return false;
+                }
+
                 $rolReasignado = $t->validaciones['asignacion_desde_estado_actual'] ?? null;
+
+                if (in_array($t->codigo, self::TRANSICIONES_DEL_ANALISTA_TRAS_REASIGNACION, true)
+                    && $usuario->tieneRol('COMPRAS_ANALISTA') && ! $usuario->tieneRol('COMPRAS_JEFE')
+                    && ! $this->tieneAsignacionDesdeEstado($proceso, 'COMPRAS_ANALISTA', $usuario)) {
+                    return false;
+                }
 
                 return $usuario->tienePermiso($codigo)
                     && (! $t->permiso->requiere_asignacion || $asignado)
@@ -188,7 +205,30 @@ class ServicioProceso
                 'entidad_id' => $proceso->id,
                 'valores_nuevos' => json_encode(['analista_id' => $analista->id]),
             ]);
+
+            $this->publicarAlAsignar($proceso->fresh(), $analista, $jefe);
         });
+    }
+
+    /**
+     * Cuando la unidad ya remitio los documentos legalizados y el Jefe asigna al analista, el proceso pasa solo
+     * a "Para publicar" y se genera su numero (PE-AILEP-AAAA-NNN). La accion queda registrada a nombre del analista
+     * asignado, que es quien tiene el permiso, con un comentario que indica el origen automatico.
+     */
+    private function publicarAlAsignar(Proceso $proceso, User $analista, User $jefe): void
+    {
+        $proceso->loadMissing('estadoProceso');
+        if ($proceso->estadoProceso?->codigo !== 'LEGALIZADO' || $proceso->solicitudRemitida() === null) {
+            return;
+        }
+
+        $autorizar = TransicionProceso::where('codigo', 'autorizar_publicacion')->firstOrFail();
+        $this->aplicarTransicion($proceso, $autorizar, $analista, "{$jefe->name} asignó el proceso para su publicación");
+
+        $proceso = $proceso->fresh();
+        if ($proceso->codigo === null) {
+            $this->generarCodigo($proceso, $analista);
+        }
     }
 
     /** Ejecuta dentro de una transaccion (savepoint si ya hay una) y traduce el error de la base. */

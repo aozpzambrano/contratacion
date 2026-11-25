@@ -22,6 +22,7 @@ class TiposDocumentoTable
                 IconColumn::make('requiere_revision')->label('Revisión')->boolean(),
                 IconColumn::make('requiere_legalizacion')->label('Legaliz.')->boolean(),
                 IconColumn::make('permite_multiples')->label('Varios')->boolean(),
+                IconColumn::make('editable_tras_devolucion')->label('Editable tras devolución')->boolean(),
                 IconColumn::make('activo')->label('Activo')->boolean(),
             ])
             ->recordActions([EditAction::make()])

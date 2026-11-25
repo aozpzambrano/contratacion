@@ -12,7 +12,7 @@ class TipoDocumento extends Model
     protected $fillable = [
         'codigo', 'nombre', 'fase_id', 'etapa_id', 'rol_generador_id', 'rol_revisor_id',
         'requiere_revision', 'requiere_aprobacion', 'requiere_legalizacion',
-        'extensiones_permitidas', 'tamano_maximo_mb', 'permite_multiples', 'activo',
+        'extensiones_permitidas', 'tamano_maximo_mb', 'permite_multiples', 'editable_tras_devolucion', 'activo',
     ];
 
     protected function casts(): array
@@ -22,6 +22,7 @@ class TipoDocumento extends Model
             'requiere_aprobacion' => 'boolean',
             'requiere_legalizacion' => 'boolean',
             'permite_multiples' => 'boolean',
+            'editable_tras_devolucion' => 'boolean',
             'activo' => 'boolean',
         ];
     }

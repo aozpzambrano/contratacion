@@ -26,8 +26,8 @@ class ProcesosTest extends TestCase
         Livewire::test(CreateProceso::class)
             ->fillForm([
                 'tipo_proceso_id' => TipoProceso::value('id'),
-                'descripcion_producto' => 'Adquisicion de medicamentos',
-                'items' => [['cum' => '12345-1', 'cantidad' => 10, 'detalle' => 'Paracetamol 500 mg']],
+                'objeto_contratacion' => 'Adquisicion de medicamentos',
+                'items' => [['cum' => '12345-1', 'cantidad' => 10, 'descripcion' => 'Paracetamol 500 mg']],
             ])
             ->call('create')
             ->assertHasNoFormErrors();
@@ -89,8 +89,8 @@ class ProcesosTest extends TestCase
         Livewire::test(CreateProceso::class)
             ->fillForm([
                 'tipo_proceso_id' => TipoProceso::value('id'),
-                'descripcion_producto' => 'Proceso a enviar',
-                'items' => [['cum' => '1', 'cantidad' => 1, 'detalle' => 'x']],
+                'objeto_contratacion' => 'Proceso a enviar',
+                'items' => [['cum' => '1', 'cantidad' => 1, 'descripcion' => 'x']],
             ])
             ->call('create');
 

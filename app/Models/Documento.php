@@ -52,4 +52,14 @@ class Documento extends Model
         return $this->belongsTo(User::class, 'creado_por');
     }
 
+    /** Ultima legalizacion (PDF firmado) del documento; la anterior queda como respaldo. */
+    public function legalizacionVigente(): ?Legalizacion
+    {
+        return Legalizacion::query()
+            ->whereIn('documento_version_id', DocumentoVersion::query()->where('documento_id', $this->id)->select('id'))
+            ->whereNotNull('archivo_id')
+            ->orderByDesc('id')
+            ->first();
+    }
+
 }

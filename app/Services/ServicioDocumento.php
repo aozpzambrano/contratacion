@@ -31,6 +31,9 @@ class ServicioDocumento
     /** Roles que cargan documentos fuera de los estados editables del proceso, si estan asignados. */
     private const ROL_QUE_CARGA_SIEMPRE = 'COMPRAS_ANALISTA';
 
+    /** Estado en que queda el proceso cuando Compras lo devuelve a la unidad despues de legalizado. */
+    public const ESTADO_TRAS_DEVOLUCION = 'PARA_REVISION';
+
     // ---------------------------------------------------------------- permisos
 
     public function puedeVerProceso(Proceso $proceso, User $usuario): bool
@@ -51,11 +54,54 @@ class ServicioDocumento
         if ($proceso->estadoProceso?->es_final) {
             return false;
         }
+        // Devuelto por Compras tras la legalizacion: solo la unidad requirente completa documentos.
+        if ($this->enRevisionTrasDevolucion($proceso)) {
+            return $this->esUnidadDelProceso($usuario);
+        }
         if ($proceso->esEditable()) {
             return true;
         }
 
         return $this->esAnalistaAsignado($proceso, $usuario);
+    }
+
+    /** El proceso fue devuelto a la unidad despues de legalizado ("Para revision"). */
+    public function enRevisionTrasDevolucion(Proceso $proceso): bool
+    {
+        return $proceso->estadoProceso?->codigo === self::ESTADO_TRAS_DEVOLUCION;
+    }
+
+    private function esUnidadDelProceso(User $usuario): bool
+    {
+        return $usuario->tieneRol('UNIDAD_REQUIRENTE');
+    }
+
+    /**
+     * Eliminar (anular) un documento: solo la unidad, con el proceso devuelto, y solo los tipos que el
+     * administrador marco como editables tras la devolucion.
+     */
+    public function puedeAnular(Documento $documento, User $usuario): bool
+    {
+        $documento->loadMissing(['proceso.estadoProceso', 'estadoDocumento', 'tipoDocumento']);
+
+        return $usuario->activo && $usuario->tienePermiso('documentos.anular')
+            && $this->puedeVerProceso($documento->proceso, $usuario)
+            && $this->enRevisionTrasDevolucion($documento->proceso)
+            && $this->esUnidadDelProceso($usuario)
+            && $documento->tipoDocumento->editable_tras_devolucion
+            && $documento->estadoDocumento?->codigo === 'APROBADO';
+    }
+
+    public function anularDocumento(Documento $documento, User $usuario, string $motivo): void
+    {
+        if (! $this->puedeAnular($documento, $usuario)) {
+            throw new DomainException('No puede eliminar este documento en el estado actual del proceso.');
+        }
+        if (trim($motivo) === '') {
+            throw new DomainException('Indique el motivo para eliminar el documento.');
+        }
+
+        DB::select('select aplicar_transicion_documento(?, ?, ?, ?)', [$documento->id, 'anular', $usuario->id, trim($motivo)]);
     }
 
     /** El usuario es el analista de Compras asignado al proceso (vigente). */
@@ -72,13 +118,18 @@ class ServicioDocumento
      */
     public function puedeAgregarVersion(Documento $documento, User $usuario): bool
     {
-        $documento->loadMissing(['proceso.estadoProceso', 'proceso.estadoMacro', 'estadoDocumento']);
+        $documento->loadMissing(['proceso.estadoProceso', 'proceso.estadoMacro', 'estadoDocumento', 'tipoDocumento']);
         $proceso = $documento->proceso;
         $estado = $documento->estadoDocumento?->codigo;
 
         if (! $usuario->activo || ! $usuario->tienePermiso('documentos.subir')
             || ! $this->puedeVerProceso($proceso, $usuario) || $proceso->estadoProceso?->es_final) {
             return false;
+        }
+
+        if ($this->enRevisionTrasDevolucion($proceso)) {
+            // Solo la unidad, solo los tipos editables y sin cambiar el estado del documento (ya aprobado)
+            return $this->esUnidadDelProceso($usuario) && $documento->tipoDocumento->editable_tras_devolucion && $estado === 'APROBADO';
         }
 
         if ($this->esAnalistaAsignado($proceso, $usuario)) {
@@ -114,6 +165,7 @@ class ServicioDocumento
 
         return TipoDocumento::query()
             ->where('activo', true)
+            ->when($this->enRevisionTrasDevolucion($proceso), fn ($query) => $query->where('editable_tras_devolucion', true))
             ->where(fn ($query) => $query->where('permite_multiples', true)->orWhereNotIn('id', $tiposYaCargados))
             ->where(fn ($query) => $query->whereNull('fase_id')->orWhere('fase_id', $faseId))
             ->where(fn ($query) => $query->whereNull('rol_generador_id')->orWhereIn('rol_generador_id', $rolesIds))
@@ -164,7 +216,15 @@ class ServicioDocumento
                 );
             }
 
-            return $this->guardar($proceso, $tipo, null, $titulo, $rutaTemporal, $nombreOriginal, $comentario, $usuario);
+            $documento = $this->guardar($proceso, $tipo, null, $titulo, $rutaTemporal, $nombreOriginal, $comentario, $usuario);
+
+            // Los tipos sin revision (fichas, certificados...) quedan aprobados al cargarlos con el proceso ya devuelto.
+            if (! $tipo->requiere_revision && $this->enRevisionTrasDevolucion($proceso)) {
+                DB::select('select aplicar_transicion_documento(?, ?, ?, ?)', [$documento->id, 'registrar_sin_revision', $usuario->id, null]);
+                $documento->refresh();
+            }
+
+            return $documento;
         } catch (Throwable $e) {
             Storage::disk(self::DISCO)->delete($rutaTemporal);
             throw $e;
@@ -222,22 +282,8 @@ class ServicioDocumento
                     ])->save();
                 }
 
-                $interno = Str::uuid()->toString().'.'.$extension;
-                $rutaFinal = "procesos/{$proceso->id}/documentos/{$documento->id}/{$interno}";
-                $disco->move($rutaTemporal, $rutaFinal);
-
-                $archivo = new Archivo;
-                $archivo->forceFill([
-                    'disco' => self::DISCO,
-                    'ruta' => $rutaFinal,
-                    'nombre_original' => Str::limit(basename(str_replace('\\', '/', $nombreOriginal)), 250, ''),
-                    'nombre_interno' => $interno,
-                    'extension' => $extension,
-                    'mime' => $disco->mimeType($rutaFinal) ?: 'application/octet-stream',
-                    'tamano_bytes' => $disco->size($rutaFinal),
-                    'hash_sha256' => $this->hash($rutaFinal),
-                    'user_id' => $usuario->id,
-                ])->save();
+                $archivo = $this->almacenar($proceso, $documento, $rutaTemporal, $nombreOriginal, $extension, $usuario);
+                $rutaFinal = $archivo->ruta;
 
                 // numero_version lo asigna el trigger de la BD; version_actual_id tambien.
                 $version = new DocumentoVersion;
@@ -271,8 +317,139 @@ class ServicioDocumento
         }
     }
 
+    /**
+     * Mueve el archivo temporal a su ubicacion definitiva y lo registra en "archivos".
+     * Las rutas creadas se recuerdan para poder limpiarlas si la operacion completa se revierte.
+     */
+    private function almacenar(Proceso $proceso, Documento $documento, string $rutaTemporal, string $nombreOriginal, string $extension, User $usuario): Archivo
+    {
+        $disco = Storage::disk(self::DISCO);
+        $interno = Str::uuid()->toString().'.'.$extension;
+        $ruta = "procesos/{$proceso->id}/documentos/{$documento->id}/{$interno}";
+        $disco->move($rutaTemporal, $ruta);
+        $this->rutasNuevas[] = $ruta;
+
+        $archivo = new Archivo;
+        $archivo->forceFill([
+            'disco' => self::DISCO,
+            'ruta' => $ruta,
+            'nombre_original' => Str::limit(basename(str_replace('\\', '/', $nombreOriginal)), 250, ''),
+            'nombre_interno' => $interno,
+            'extension' => $extension,
+            'mime' => $disco->mimeType($ruta) ?: 'application/octet-stream',
+            'tamano_bytes' => $disco->size($ruta),
+            'hash_sha256' => $this->hash($ruta),
+            'user_id' => $usuario->id,
+        ])->save();
+
+        return $archivo;
+    }
+
+    /** @var array<int, string> archivos definitivos creados por este servicio en la operacion en curso */
+    private array $rutasNuevas = [];
+
+    /** Borra del disco los archivos definitivos creados en una operacion que se revirtio. */
+    public function descartarRutasNuevas(): void
+    {
+        Storage::disk(self::DISCO)->delete($this->rutasNuevas);
+        $this->rutasNuevas = [];
+    }
+
+    /**
+     * Guarda un documento sin las comprobaciones de la pantalla de carga (las hace quien llama).
+     * Lo usa la solicitud de publicacion para crear el memorando.
+     */
+    public function guardarInterno(
+        Proceso $proceso,
+        TipoDocumento $tipo,
+        ?string $titulo,
+        string $rutaTemporal,
+        string $nombreOriginal,
+        ?string $comentario,
+        User $usuario,
+    ): Documento {
+        return $this->guardar($proceso, $tipo, null, $titulo, $rutaTemporal, $nombreOriginal, $comentario, $usuario);
+    }
+
+    /**
+     * Guarda un PDF que ya llega legalizado (firmado) y lo deja en estado LEGALIZADO en un solo paso:
+     * la unidad requirente usa 'legalizar' y el analista de compras 'registrar_legalizado' (memorando e informe de devolucion).
+     * El PDF cargado es la version legalizada; la BD valida el permiso del usuario.
+     */
+    public function registrarLegalizadoDirecto(Proceso $proceso, TipoDocumento $tipo, ?string $titulo, string $rutaTemporal, string $nombreOriginal, User $usuario, string $transicionFinal = 'legalizar'): Documento
+    {
+        $documento = $this->guardarInterno($proceso, $tipo, $titulo, $rutaTemporal, $nombreOriginal, null, $usuario);
+        $documento->refresh();
+
+        DB::select('select aplicar_transicion_documento(?, ?, ?, ?)', [$documento->id, 'registrar_sin_revision', $usuario->id, null]);
+
+        $archivoId = DB::table('documento_versiones')->where('id', $documento->version_actual_id)->value('archivo_id');
+        DB::table('legalizaciones')->insert([
+            'documento_version_id' => $documento->version_actual_id,
+            'user_id' => $usuario->id,
+            'archivo_id' => $archivoId,
+        ]);
+        DB::select('select aplicar_transicion_documento(?, ?, ?, ?)', [$documento->id, $transicionFinal, $usuario->id, null]);
+
+        DB::table('auditoria')->insert([
+            'user_id' => $usuario->id,
+            'evento' => 'documento.legalizado',
+            'entidad' => 'documentos',
+            'entidad_id' => $documento->id,
+            'valores_nuevos' => json_encode(['directo' => true, 'transicion' => $transicionFinal]),
+        ]);
+
+        return $documento;
+    }
+
+    /**
+     * Legaliza un documento APROBADO con el PDF firmado electronicamente: guarda el archivo,
+     * deja el registro en "legalizaciones" (sobre la version vigente) y aplica la transicion 'legalizar'.
+     * La BD valida el permiso del usuario y el estado.
+     */
+    public function legalizarDocumento(Documento $documento, string $rutaTemporal, string $nombreOriginal, User $usuario, ?string $observacion = null): void
+    {
+        $documento->loadMissing(['proceso', 'tipoDocumento']);
+        $extension = $this->validarArchivo($documento->tipoDocumento, $rutaTemporal, $nombreOriginal, ['pdf']);
+
+        if ($documento->version_actual_id === null) {
+            throw new DomainException("El documento \"{$documento->titulo}\" no tiene versiones.");
+        }
+
+        $archivo = $this->almacenar($documento->proceso, $documento, $rutaTemporal, $nombreOriginal, $extension, $usuario);
+
+        DB::table('legalizaciones')->insert([
+            'documento_version_id' => $documento->version_actual_id,
+            'user_id' => $usuario->id,
+            'archivo_id' => $archivo->id,
+            'observacion' => filled($observacion) ? trim($observacion) : null,
+        ]);
+
+        DB::select('select aplicar_transicion_documento(?, ?, ?, ?)', [$documento->id, 'legalizar', $usuario->id, null]);
+
+        DB::table('auditoria')->insert([
+            'user_id' => $usuario->id,
+            'evento' => 'documento.legalizado',
+            'entidad' => 'documentos',
+            'entidad_id' => $documento->id,
+            'valores_nuevos' => json_encode(['archivo' => $archivo->nombre_original, 'sha256' => $archivo->hash_sha256]),
+        ]);
+    }
+
+    /** Documentos del proceso que deben legalizarse y siguen APROBADOS (esperan su PDF firmado). */
+    public function documentosPorLegalizar(Proceso $proceso): Collection
+    {
+        return Documento::query()
+            ->with('estadoDocumento:id,codigo')
+            ->where('proceso_id', $proceso->id)
+            ->whereHas('estadoDocumento', fn ($query) => $query->where('codigo', 'APROBADO'))
+            ->whereHas('tipoDocumento', fn ($query) => $query->where('requiere_legalizacion', true))
+            ->orderBy('id')
+            ->get();
+    }
+
     /** @return string extension (minuscula) del archivo ya validado */
-    private function validarArchivo(TipoDocumento $tipo, string $ruta, string $nombreOriginal): string
+    private function validarArchivo(TipoDocumento $tipo, string $ruta, string $nombreOriginal, ?array $soloExtensiones = null): string
     {
         $disco = Storage::disk(self::DISCO);
 
@@ -281,7 +458,7 @@ class ServicioDocumento
         }
 
         $extension = strtolower(pathinfo($nombreOriginal, PATHINFO_EXTENSION));
-        $permitidas = $tipo->extensiones();
+        $permitidas = $soloExtensiones ?? $tipo->extensiones();
         if ($extension === '' || ! in_array($extension, $permitidas, true)) {
             throw new DomainException('Tipo de archivo no permitido. Formatos aceptados: '.strtoupper(implode(', ', $permitidas)).'.');
         }
@@ -510,6 +687,38 @@ class ServicioDocumento
     }
 
     // ---------------------------------------------------------------- descarga
+
+    /** Descarga el PDF legalizado vigente de un documento LEGALIZADO. */
+    public function descargarLegalizado(Documento $documento, User $usuario): StreamedResponse
+    {
+        $documento->loadMissing(['proceso', 'estadoDocumento']);
+
+        if (! $this->puedeDescargar($documento, $usuario)) {
+            abort(403, 'No tiene permiso para descargar este documento.');
+        }
+
+        $legalizacion = $documento->estadoDocumento?->codigo === 'LEGALIZADO' ? $documento->legalizacionVigente() : null;
+        if ($legalizacion === null) {
+            abort(404, 'El documento no tiene una version legalizada vigente.');
+        }
+
+        $archivo = $legalizacion->archivo;
+        $disco = Storage::disk($archivo->disco);
+        if (! $disco->exists($archivo->ruta)) {
+            abort(404, 'El archivo ya no esta disponible.');
+        }
+
+        DB::table('auditoria')->insert([
+            'user_id' => $usuario->id,
+            'evento' => 'documento.legalizado_descargado',
+            'entidad' => 'documentos',
+            'entidad_id' => $documento->id,
+            'valores_nuevos' => json_encode(['archivo_id' => $archivo->id]),
+            'ip' => request()->ip(),
+        ]);
+
+        return $disco->download($archivo->ruta, $archivo->nombre_original);
+    }
 
     public function descargar(DocumentoVersion $version, User $usuario): StreamedResponse
     {

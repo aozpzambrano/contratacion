@@ -22,8 +22,8 @@ class ProcesoForm
                         ->relationship('tipoProceso', 'nombre', fn ($query) => $query->where('activo', true))
                         ->default(fn () => \App\Models\TipoProceso::where('activo', true)->orderBy('id')->value('id'))
                         ->required(),
-                    Textarea::make('descripcion_producto')
-                        ->label('Descripción del producto')
+                    Textarea::make('objeto_contratacion')
+                        ->label('Objeto de contratación')
                         ->required()
                         ->columnSpanFull(),
                     TextInput::make('codigo_cpc')
@@ -53,8 +53,8 @@ class ProcesoForm
                                 ->numeric()
                                 ->minValue(1)
                                 ->required(),
-                            Textarea::make('detalle')
-                                ->label('Detalle')
+                            Textarea::make('descripcion')
+                                ->label('Descripción')
                                 ->required()
                                 ->rows(2)
                                 ->columnSpan(3),

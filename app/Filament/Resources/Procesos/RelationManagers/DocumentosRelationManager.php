@@ -6,8 +6,11 @@ use App\Filament\Resources\Procesos\Pages\ViewProceso;
 use App\Models\Documento;
 use App\Models\TipoDocumento;
 use App\Services\ServicioDocumento;
+use App\Services\ServicioDocumentoFijo;
+use App\Services\ServicioExpedientePublicacion;
 use DomainException;
 use Filament\Actions\Action;
+use Filament\Forms\Components\CheckboxList;
 use Filament\Forms\Components\FileUpload;
 use Filament\Forms\Components\Select;
 use Filament\Forms\Components\Textarea;
@@ -83,6 +86,35 @@ class DocumentosRelationManager extends RelationManager
                         }, 'Documento cargado');
                         $this->recargarPagina();
                     }),
+                Action::make('generar_expediente_publicacion')
+                    ->label('Generar Expediente Publicación')
+                    ->icon('heroicon-o-archive-box-arrow-down')
+                    ->color('success')
+                    ->visible(fn () => app(ServicioExpedientePublicacion::class)->puedeGenerar($this->getOwnerRecord(), auth()->user()))
+                    ->modalHeading('Generar Expediente Publicación')
+                    ->modalDescription('Marque los documentos que irán en el archivo .zip. La Validación de Firmas Electrónicas y la Autorización del Requerimiento vienen sin marcar.')
+                    ->modalSubmitActionLabel('Generar y descargar')
+                    ->modalWidth('2xl')
+                    ->fillForm(fn () => ['elementos' => app(ServicioExpedientePublicacion::class)->marcadasPorDefecto($this->getOwnerRecord())])
+                    ->schema(fn () => [
+                        CheckboxList::make('elementos')
+                            ->label('Documentos')
+                            ->options(app(ServicioExpedientePublicacion::class)->opciones($this->getOwnerRecord())->pluck('etiqueta', 'clave'))
+                            ->required(),
+                    ])
+                    ->action(function (array $data) {
+                        try {
+                            [$ruta, $nombre] = app(ServicioExpedientePublicacion::class)->generar(
+                                $this->getOwnerRecord(), auth()->user(), (array) ($data['elementos'] ?? [])
+                            );
+                        } catch (DomainException $e) {
+                            Notification::make()->title('No se pudo generar el expediente')->body($e->getMessage())->danger()->send();
+
+                            return null;
+                        }
+
+                        return app(ServicioDocumentoFijo::class)->entregar($ruta, $nombre, true);
+                    }),
             ])
             ->recordActions([
                 Action::make('versiones')
@@ -99,6 +131,25 @@ class DocumentosRelationManager extends RelationManager
                     ->visible(fn (Documento $record) => $record->version_actual_id !== null
                         && $servicio->puedeDescargar($record, auth()->user()))
                     ->url(fn (Documento $record) => route('documentos.descargar', $record->version_actual_id)),
+                Action::make('descargar_legalizado')
+                    ->label('Descargar legalizado')
+                    ->icon('heroicon-o-check-badge')
+                    ->color('success')
+                    ->visible(fn (Documento $record) => $record->estadoDocumento?->codigo === 'LEGALIZADO'
+                        && $servicio->puedeDescargar($record, auth()->user()))
+                    ->url(fn (Documento $record) => route('documentos.descargar_legalizado', $record)),
+                Action::make('eliminar')
+                    ->label('Eliminar')
+                    ->icon('heroicon-o-trash')
+                    ->color('danger')
+                    ->visible(fn (Documento $record) => $servicio->puedeAnular($record, auth()->user()))
+                    ->modalHeading(fn (Documento $record) => 'Eliminar: '.$record->titulo)
+                    ->modalDescription('El documento deja de formar parte del expediente; queda un registro de respaldo.')
+                    ->schema([Textarea::make('motivo')->label('Motivo')->rows(2)->required()])
+                    ->action(function (array $data, Documento $record) use ($servicio) {
+                        $this->ejecutar(fn () => $servicio->anularDocumento($record, auth()->user(), (string) $data['motivo']), 'Documento eliminado');
+                        $this->recargarPagina();
+                    }),
                 Action::make('nueva_version')
                     // El analista "sube" su documento corregido; la unidad requirente carga una "nueva versión".
                     ->label(fn () => $servicio->esAnalistaAsignado($this->getOwnerRecord(), auth()->user()) ? 'Subir documento' : 'Nueva versión')

@@ -6,9 +6,11 @@ use App\Filament\Resources\Procesos\Pages\ViewProceso;
 use App\Models\Proceso;
 use App\Models\TransicionProceso;
 use App\Models\User;
+use App\Services\ServicioDocumento;
 use App\Services\ServicioProceso;
 use DomainException;
 use Illuminate\Foundation\Testing\RefreshDatabase;
+use Illuminate\Support\Facades\Storage;
 use Livewire\Livewire;
 use Tests\Feature\Concerns\CreaProcesos;
 use Tests\TestCase;
@@ -165,7 +167,7 @@ class TransicionesProcesoTest extends TestCase
         $this->servicio->asignarAnalista($p, $unidad, $jefe);
     }
 
-    public function test_el_codigo_se_genera_en_para_publicar_y_publicar_lo_exige(): void
+    public function test_el_codigo_se_genera_al_asignar_el_analista_tras_remitir(): void
     {
         $jefe = User::factory()->conRoles('COMPRAS_JEFE')->create();
         $unidad = User::factory()->conRoles('UNIDAD_REQUIRENTE')->create();
@@ -178,27 +180,22 @@ class TransicionesProcesoTest extends TestCase
 
         $this->servicio->aplicarTransicion($p, $this->transicion('enviar_a_revision'), $unidad);
         $this->servicio->aplicarTransicion($p->fresh(), $this->transicion('validar_documentacion'), $analista);
-        // el analista que valido no autoriza hasta que el Jefe lo asigne de nuevo en esta etapa
+        // no se autoriza sin que la unidad remita los documentos legalizados
+        Storage::fake(ServicioDocumento::DISCO);
         $this->assertSame([], $this->servicio->transicionesDisponibles($p->fresh(), $analista)->pluck('codigo')->all());
+        $this->remitirLegalizados($p->fresh(), $unidad);
+        // y el analista que valido no autoriza hasta que el Jefe lo asigne de nuevo en esta etapa
+        $this->assertSame([], $this->servicio->transicionesDisponibles($p->fresh(), $analista)->pluck('codigo')->all());
+        // al asignar el analista, el proceso pasa solo a "Para publicar" y se genera el numero
+        $this->assertNull($p->fresh()->codigo);
         $this->servicio->asignarAnalista($p->fresh(), $analista, $jefe);
-        $this->servicio->aplicarTransicion($p->fresh(), $this->transicion('autorizar_publicacion'), $analista);
 
         $p = $p->fresh();
         $this->assertSame('PARA_PUBLICAR', $p->estadoProceso->codigo);
-        $this->assertTrue($this->servicio->puedeGenerarCodigo($p, $analista));
+        $this->assertMatchesRegularExpression('/^PE-AILEP-\d{4}-001$/', $p->codigo);
+        $this->assertFalse($this->servicio->puedeGenerarCodigo($p, $analista));
         $this->assertFalse($this->servicio->puedeGenerarCodigo($p, $unidad));
-
-        try {
-            $this->servicio->aplicarTransicion($p, $this->transicion('publicar'), $analista);
-            $this->fail('Publicar debio exigir el codigo');
-        } catch (DomainException $e) {
-            $this->assertStringContainsString('debe tener codigo', $e->getMessage());
-        }
-
-        $codigo = $this->servicio->generarCodigo($p, $analista);
-        $this->assertMatchesRegularExpression('/^PE-AILEP-\d{4}-001$/', $codigo);
-        $this->assertSame($codigo, $p->fresh()->codigo);
-        $this->assertFalse($this->servicio->puedeGenerarCodigo($p->fresh(), $analista));
+        $codigo = $p->codigo;
 
         $this->expectException(DomainException::class);
         $this->expectExceptionMessage('ya tiene codigo');

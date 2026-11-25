@@ -193,11 +193,22 @@ class RevisionDocumentosTest extends TestCase
             $this->procesos->aplicarTransicion($p, $this->transicion('autorizar_publicacion'), $this->analista);
             $this->fail('No debio autorizar sin reasignacion');
         } catch (DomainException $e) {
-            $this->assertStringContainsString('asignar nuevamente al analista', $e->getMessage());
+            $this->assertStringContainsString('no esta permitida', $e->getMessage());
         }
 
+        // aun sin remision de la unidad el Jefe puede reasignar, pero no hay nada que autorizar
         $this->procesos->asignarAnalista($p, $this->analista, $this->jefe);
-        $this->assertSame(['autorizar_publicacion'], $this->procesos->transicionesDisponibles($p->fresh(), $this->analista)->pluck('codigo')->all());
+        $this->assertSame([], $this->procesos->transicionesDisponibles($p->fresh(), $this->analista)->pluck('codigo')->all());
+
+        // la unidad remite los legalizados: la remision invalida la asignacion previa y el Jefe debe asignar de nuevo
+        $this->remitirLegalizados($p->fresh(), $this->unidad);
+        $this->assertSame([], $this->procesos->transicionesDisponibles($p->fresh(), $this->analista)->pluck('codigo')->all());
+        $this->procesos->asignarAnalista($p->fresh(), $this->analista, $this->jefe);
+        // reasignado tras la remision: el proceso pasa solo a "Para publicar" y recibe su numero
+        $this->assertSame('PARA_PUBLICAR', $this->estadoProceso());
+        $this->assertMatchesRegularExpression('/^PE-AILEP-\d{4}-\d{3}$/', $this->proceso->fresh()->codigo);
+        $this->assertContains('devolver_publicacion', $this->procesos->transicionesDisponibles($p->fresh(), $this->analista)->pluck('codigo')->all());
+        $this->assertNotContains('autorizar_publicacion', $this->procesos->transicionesDisponibles($p->fresh(), $this->jefe)->pluck('codigo')->all());
 
         // reasignar al mismo analista en la misma etapa no duplica la asignacion
         $this->procesos->asignarAnalista($p->fresh(), $this->analista, $this->jefe);

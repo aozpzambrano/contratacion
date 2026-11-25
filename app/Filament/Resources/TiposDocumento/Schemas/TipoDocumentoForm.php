@@ -68,6 +68,9 @@ class TipoDocumentoForm
                     Toggle::make('permite_multiples')
                         ->label('Permite varios documentos por proceso')
                         ->helperText('Apagado: un solo documento por proceso; las correcciones son versiones nuevas.'),
+                    Toggle::make('editable_tras_devolucion')
+                        ->label('La unidad lo puede modificar si Compras devuelve el proceso ya legalizado')
+                        ->helperText('Permite cargar, versionar o eliminar este documento cuando el proceso está en "Para revisión".'),
                     Toggle::make('activo')->label('Activo')->default(true),
                 ]),
             Section::make('Archivos')

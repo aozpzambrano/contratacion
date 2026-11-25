@@ -3,12 +3,14 @@
 namespace App\Providers;
 
 use App\Models\Documento;
+use App\Models\DocumentoFijo;
 use App\Models\Permiso;
 use App\Models\Proceso;
 use App\Models\RequisitoTransicion;
 use App\Models\Rol;
 use App\Models\TipoDocumento;
 use App\Models\User;
+use App\Policies\DocumentoFijoPolicy;
 use App\Policies\DocumentoPolicy;
 use App\Policies\PermisoPolicy;
 use App\Policies\ProcesoPolicy;
@@ -38,6 +40,7 @@ class AppServiceProvider extends ServiceProvider
         Gate::policy(Proceso::class, ProcesoPolicy::class);
         Gate::policy(Documento::class, DocumentoPolicy::class);
         Gate::policy(TipoDocumento::class, TipoDocumentoPolicy::class);
+        Gate::policy(DocumentoFijo::class, DocumentoFijoPolicy::class);
         Gate::policy(RequisitoTransicion::class, RequisitoTransicionPolicy::class);
 
         // Habilidades con formato "modulo.accion" (p. ej. documentos.revisar) se resuelven
