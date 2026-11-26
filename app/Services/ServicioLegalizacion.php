@@ -67,7 +67,8 @@ class ServicioLegalizacion
             ->whereHas('estadoDocumento', fn ($q) => $q->where('codigo', '!=', 'ANULADO'))
             ->pluck('tipo_documento_id');
 
-        return TipoDocumento::query()->whereIn('id', $requeridos)->whereNotIn('id', $existentes)->where('activo', true)->orderBy('id')->get();
+        return TipoDocumento::query()->whereIn('id', $requeridos)->whereNotIn('id', $existentes)->where('activo', true)->orderBy('id')->get()
+            ->sortBy(fn (TipoDocumento $t) => ServicioExpedientePublicacion::posicionTipo($t->codigo), SORT_REGULAR)->values();
     }
 
     /**
@@ -75,7 +76,7 @@ class ServicioLegalizacion
      * @param  array{0: string, 1: string}  $memorando  [ruta temporal, nombre original]
      * @param  array<int, int|string>  $horas  horas de cada publicacion, en orden (la cantidad = numero de publicaciones)
      * @param  array<int, array<int, array{0: string, 1: string}>>  $adicionales  por id de tipo de documento: lista de [ruta temporal, nombre original]
-     * @param  array<int, array{0: string, 1: string}>  $distributivos  uno o varios archivos (PDF, Word o Excel) del tipo Distributivo; opcional
+     * @param  array<int, array{0: string, 1: string}>  $distributivos  uno o varios archivos (PDF, Word o Excel) del tipo Distributivo; obligatorio si el proceso aun no tiene uno
      */
     public function remitir(Proceso $proceso, User $usuario, array $legalizados, array $memorando, string $numeroMemorando, array $horas, array $adicionales = [], array $distributivos = []): void
     {
@@ -189,8 +190,8 @@ class ServicioLegalizacion
         }
 
         foreach ($horas as $i => $h) {
-            if (filter_var($h, FILTER_VALIDATE_INT) === false || (int) $h < 1 || (int) $h > self::MAX_HORAS) {
-                throw new DomainException('Las horas de la publicación '.($i + 1).' deben ser un número entero entre 1 y '.self::MAX_HORAS.'.');
+            if (filter_var($h, FILTER_VALIDATE_INT) === false || (int) $h < 24 || (int) $h > self::MAX_HORAS || (int) $h % 24 !== 0) {
+                throw new DomainException('Las horas de la publicación '.($i + 1).' deben ser 24 o un múltiplo de 24 (un día completo), hasta '.self::MAX_HORAS.'.');
             }
             $horas[$i] = (int) $h;
         }

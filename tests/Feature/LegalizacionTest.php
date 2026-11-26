@@ -114,7 +114,7 @@ class LegalizacionTest extends TestCase
         $this->assertSame('LEGALIZADO', $this->estado($this->informe));
         $this->assertSame('LEGALIZADO', $this->estado($this->especificaciones));
         $this->assertSame(2, DB::table('legalizaciones')->whereNotNull('archivo_id')->where('user_id', $this->unidad->id)->count());
-        $this->assertSame('informe_de_necesidad_firmado.pdf', $this->informe->fresh()->legalizacionVigente()->archivo->nombre_original);
+        $this->assertSame('informe_necesidad_firmado.pdf', $this->informe->fresh()->legalizacionVigente()->archivo->nombre_original);
 
         // memorando como documento PDF de la unidad
         $memorando = Documento::where('proceso_id', $this->proceso->id)
@@ -153,9 +153,11 @@ class LegalizacionTest extends TestCase
     public function test_los_datos_invalidos_no_dejan_nada_a_medias_y_limpian_los_archivos(): void
     {
         $casos = [
-            'horas en cero' => [[0], 'AIL-1', 'entre 1 y'],
-            'horas excesivas' => [[24, 9000], 'AIL-1', 'entre 1 y'],
-            'horas no enteras' => [['abc'], 'AIL-1', 'entero'],
+            'horas en cero' => [[0], 'AIL-1', 'múltiplo de 24'],
+            'horas excesivas' => [[24, 9000], 'AIL-1', 'múltiplo de 24'],
+            'horas no enteras' => [['abc'], 'AIL-1', 'múltiplo de 24'],
+            'dia de 25 horas' => [[25], 'AIL-1', 'múltiplo de 24'],
+            'una publicacion de 36 horas' => [[24, 36], 'AIL-1', 'múltiplo de 24'],
             'sin publicaciones' => [[], 'AIL-1', 'entre 1 y'],
             'demasiadas publicaciones' => [array_fill(0, 11, 24), 'AIL-1', 'entre 1 y'],
             'memorando vacio' => [[24], '   ', 'número del memorando'],
@@ -235,7 +237,7 @@ class LegalizacionTest extends TestCase
 
     public function test_faltan_los_documentos_adicionales_y_la_base_dice_cuales(): void
     {
-        $this->assertSame(4, $this->legalizacion->tiposAdicionalesPendientes($this->proceso)->count());
+        $this->assertSame(5, $this->legalizacion->tiposAdicionalesPendientes($this->proceso)->count());
         $legalizados = [
             $this->informe->id => $this->pdfTemporal('i.pdf'),
             $this->especificaciones->id => $this->pdfTemporal('e.pdf'),
@@ -290,7 +292,7 @@ class LegalizacionTest extends TestCase
             ->orderBy('id')->get();
     }
 
-    public function test_el_jefe_devuelve_el_comentario_es_obligatorio_y_la_unidad_solo_toca_tres_tipos(): void
+    public function test_el_jefe_devuelve_el_comentario_es_obligatorio_y_la_unidad_solo_toca_cinco_tipos(): void
     {
         $this->remitirLegalizados($this->proceso, $this->unidad, [24], 'AIL-5-M');
         $this->assertSame('LEGALIZADO', $this->estadoProceso());
@@ -317,21 +319,25 @@ class LegalizacionTest extends TestCase
 
         $servicio = app(ServicioDocumento::class);
         $proceso = $this->proceso->fresh();
-        // la unidad solo ve los tipos editables; el analista y el Jefe no cargan en este estado
+        // la unidad solo ve los tipos editables y Otros documentos; el analista y el Jefe no cargan en este estado
         $this->assertEqualsCanonicalizing(
-            ['Fichas tecnicas', 'Certificado de no catalogado', 'Autorizacion del requerimiento'],
+            ['Distributivo', 'Fichas tecnicas', 'Certificado de no catalogado', 'Validacion de firmas electronicas', 'Autorizacion del requerimiento', 'Otros documentos'],
             $servicio->tiposDisponibles($proceso, $this->unidad)->values()->all()
         );
         $this->assertTrue($servicio->tiposDisponibles($proceso, $this->analista)->isEmpty());
         $this->assertTrue($servicio->tiposDisponibles($proceso, $this->jefe)->isEmpty());
 
         $fichas = $this->documentosDe('FICHAS_TECNICAS')->first();
-        foreach ([$this->informe, $this->especificaciones, $this->documentosDe('MEMORANDO_SOLICITUD_PUBLICACION')->first(),
-            $this->documentosDe('VALIDACION_FIRMAS_ELECTRONICAS')->first()] as $bloqueado) {
+        foreach ([$this->informe, $this->especificaciones, $this->documentosDe('MEMORANDO_SOLICITUD_PUBLICACION')->first()] as $bloqueado) {
             $this->assertFalse($servicio->puedeAgregarVersion($bloqueado, $this->unidad), $bloqueado->titulo);
             $this->assertFalse($servicio->puedeAnular($bloqueado, $this->unidad), $bloqueado->titulo);
         }
         $this->assertTrue($servicio->puedeAgregarVersion($fichas, $this->unidad));
+        foreach (['DISTRIBUTIVO', 'VALIDACION_FIRMAS_ELECTRONICAS', 'CERTIFICADO_NO_CATALOGADO', 'AUTORIZACION_REQUERIMIENTO'] as $codigo) {
+            $editable = $this->documentosDe($codigo)->first();
+            $this->assertTrue($servicio->puedeAgregarVersion($editable, $this->unidad), "{$codigo}: nueva version");
+            $this->assertTrue($servicio->puedeAnular($editable, $this->unidad), "{$codigo}: eliminar");
+        }
         $this->assertFalse($servicio->puedeAgregarVersion($fichas, $this->analista));
 
         // nueva version (conserva el estado), documento nuevo (queda aprobado) y eliminar
@@ -352,6 +358,20 @@ class LegalizacionTest extends TestCase
         }
         $servicio->anularDocumento($nueva, $this->unidad, 'Duplicada');
         $this->assertSame('ANULADO', $this->estado($nueva));
+
+        // el documento eliminado ya no se lista en Documentos y queda en el Historial de estados del proceso
+        $this->actingAs($this->unidad);
+        Livewire::test(DocumentosRelationManager::class, ['ownerRecord' => $this->proceso->fresh(), 'pageClass' => ViewProceso::class])
+            ->assertCanSeeTableRecords([$fichas])
+            ->assertCanNotSeeTableRecords([$nueva]);
+        $registro = DB::table('historial_estados_proceso as h')
+            ->join('transiciones_proceso as t', 't.id', '=', 'h.transicion_id')
+            ->where('h.proceso_id', $this->proceso->id)->where('t.codigo', 'eliminar_documento')->first();
+        $this->assertNotNull($registro);
+        $this->assertStringContainsString('Documento eliminado: Ficha item 3', $registro->comentario);
+        $this->assertStringContainsString('Motivo: Duplicada', $registro->comentario);
+        $this->assertSame($this->unidad->id, $registro->user_id);
+        $this->assertSame('PARA_REVISION', $this->proceso->fresh()->estadoProceso->codigo, 'eliminar no cambia el estado');
         $this->assertSame(2, $this->documentosDe('FICHAS_TECNICAS')->count(), 'la anulada queda como respaldo y no cuenta');
 
         // si elimina todas las fichas, la remision informa lo que falta
@@ -418,7 +438,7 @@ class LegalizacionTest extends TestCase
 
         $respuesta = $this->actingAs($this->unidad)->get($url);
         $respuesta->assertOk();
-        $this->assertStringContainsString('informe_de_necesidad_firmado.pdf', $respuesta->headers->get('content-disposition'));
+        $this->assertStringContainsString('informe_necesidad_firmado.pdf', $respuesta->headers->get('content-disposition'));
         $this->assertDatabaseHas('auditoria', ['evento' => 'documento.legalizado_descargado', 'entidad_id' => $this->informe->id]);
         $this->actingAs($this->jefe)->get($url)->assertOk();
     }

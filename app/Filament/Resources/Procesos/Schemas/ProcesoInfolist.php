@@ -3,45 +3,78 @@
 namespace App\Filament\Resources\Procesos\Schemas;
 
 use App\Services\ServicioOferta;
+use App\Services\ServicioRemisionOfertas;
 use Filament\Infolists\Components\RepeatableEntry;
 use Filament\Infolists\Components\TextEntry;
+use Filament\Infolists\Components\ViewEntry;
+use Filament\Schemas\Components\Grid;
 use Filament\Schemas\Components\Section;
 use Filament\Schemas\Schema;
 
 class ProcesoInfolist
 {
+    /** La Comision Tecnica solo ve Proceso, Items, Ofertas y Documentos. */
+    private static function esComision(): bool
+    {
+        $u = auth()->user();
+
+        return $u !== null && $u->tieneRol('COMISION_TECNICA') && ! $u->tieneRol('COMPRAS_JEFE') && ! $u->tieneRol('COMPRAS_ANALISTA') && ! $u->tieneRol('ADMIN');
+    }
+
     public static function configure(Schema $schema): Schema
     {
         return $schema->components([
-            Section::make('Proceso')
-                ->columns(3)
+            // Aviso informativo para Compras: designacion segun el mayor monto total de las ofertas recibidas.
+            Section::make('Designación sugerida')
+                ->columnSpanFull()
+                ->icon('heroicon-o-information-circle')
+                ->iconColor('info')
+                ->visible(fn ($record) => auth()->user() && app(ServicioRemisionOfertas::class)->puedeVerAviso($record, auth()->user())
+                    && app(ServicioRemisionOfertas::class)->designacionSugerida($record) !== null)
                 ->schema([
-                    TextEntry::make('codigo')->label('Código')->placeholder('Sin asignar'),
-                    TextEntry::make('estadoMacro.nombre')->label('Fase')->badge(),
-                    TextEntry::make('estadoProceso.nombre')->label('Estado')->badge(),
-                    TextEntry::make('tipoProceso.nombre')->label('Tipo'),
-                    TextEntry::make('ciclo')->label('Ciclo'),
-                    TextEntry::make('codigo_cpc')->label('Código CPC')->placeholder('-'),
-                    TextEntry::make('creador.name')->label('Creado por'),
-                    TextEntry::make('objeto_contratacion')->label('Objeto de contratación')->columnSpanFull(),
-                    TextEntry::make('observacion')->label('Observación')->placeholder('-')->columnSpanFull(),
-                ]),
-            Section::make('Ítems')
-                ->collapsible()
-                ->schema([
-                    RepeatableEntry::make('items')
+                    TextEntry::make('aviso_designacion')
                         ->hiddenLabel()
-                        ->columns(4)
-                        ->schema([
-                            TextEntry::make('numero_linea')->label('Línea'),
-                            TextEntry::make('cum')->label('CUM'),
-                            TextEntry::make('cantidad')->label('Cantidad')->numeric(),
-                            TextEntry::make('descripcion')->label('Descripción'),
-                        ]),
+                        ->state(function ($record) {
+                            $d = app(ServicioRemisionOfertas::class)->designacionSugerida($record);
+
+                            return 'Según el mayor monto total entre las ofertas recibidas (USD '
+                                .number_format($d['monto'], 2, ',', '.').') se deberá conformar: '.$d['nombre'].'.';
+                        }),
+                ]),
+            Grid::make(['default' => 1, 'lg' => 2])
+                ->columnSpanFull()
+                ->schema([
+                Section::make('Proceso')
+                    ->columns(2)
+                    ->schema([
+                        TextEntry::make('codigo')->label('Código')->placeholder('Sin asignar'),
+                        TextEntry::make('estadoMacro.nombre')->label('Fase')->badge(),
+                        TextEntry::make('estadoProceso.nombre')->label('Estado')->badge(),
+                        TextEntry::make('tipoProceso.nombre')->label('Tipo'),
+                        TextEntry::make('ciclo')->label('Ciclo'),
+                        TextEntry::make('codigo_cpc')->label('Código CPC')->placeholder('-'),
+                        TextEntry::make('creador.name')->label('Creado por'),
+                        TextEntry::make('objeto_contratacion')->label('Objeto de contratación')->columnSpanFull(),
+                        TextEntry::make('observacion')->label('Observación')->placeholder('-')->columnSpanFull(),
+                    ]),
+                Section::make('Ítems')
+                    ->collapsible()
+                    ->schema([
+                        RepeatableEntry::make('items')
+                            ->hiddenLabel()
+                            ->columns(2)
+                            ->schema([
+                                TextEntry::make('numero_linea')->label('Línea'),
+                                TextEntry::make('cum')->label('CUM'),
+                                TextEntry::make('cantidad')->label('Cantidad')->numeric(),
+                                TextEntry::make('descripcion')->label('Descripción'),
+                            ]),
+                    ]),
                 ]),
             Section::make('Solicitud de publicación')
+                ->columnSpanFull()
                 ->columns(2)
-                ->visible(fn ($record) => $record->solicitudesPublicacion()->exists())
+                ->visible(fn ($record) => ! self::esComision() && $record->solicitudesPublicacion()->exists())
                 ->schema([
                     TextEntry::make('solicitud_memorando')
                         ->label('N.° de memorando')
@@ -68,49 +101,64 @@ class ProcesoInfolist
                         ->columnSpanFull(),
                 ]),
             Section::make('Publicaciones')
-                ->visible(fn ($record) => $record->publicaciones()->exists())
+                ->columnSpanFull()
+                ->collapsible()
+                ->visible(fn ($record) => ! self::esComision() && $record->publicaciones()->exists())
                 ->schema([
-                    RepeatableEntry::make('publicaciones')
+                    ViewEntry::make('publicaciones_tabla')
                         ->hiddenLabel()
-                        ->columns(4)
-                        ->schema([
-                            TextEntry::make('secuencia')->label('N.°'),
-                            TextEntry::make('fecha_publicacion')->label('Fecha de Publicación')->dateTime('d/m/Y H:i'),
-                            TextEntry::make('fecha_limite')->label('Fecha Límite')->dateTime('d/m/Y H:i'),
-                            TextEntry::make('enlace')->label('Link de Publicación')->url(fn ($state) => $state, true)->limit(40),
-                            TextEntry::make('codigo_nc')->label('Necesidad de Contratación Publicación')->columnSpanFull(),
-                        ]),
+                        ->state(fn ($record) => $record->publicaciones()->get()->map(fn ($p) => [
+                            'secuencia' => $p->secuencia,
+                            'codigo_nc' => $p->codigo_nc,
+                            'fecha_publicacion' => $p->fecha_publicacion,
+                            'fecha_limite' => $p->fecha_limite,
+                            'enlace' => $p->enlace,
+                        ])->all())
+                        ->view('filament.infolists.publicaciones-tabla')
+                        ->columnSpanFull(),
                 ]),
             Section::make('Ofertas')
-                ->visible(fn ($record) => $record->ofertas()->exists())
-                ->schema([
-                    RepeatableEntry::make('ofertas_resumen')
-                        ->hiddenLabel()
-                        ->state(fn ($record) => app(ServicioOferta::class)->resumen($record)->map(fn ($o) => $o + [
-                            'total_texto' => '$ '.number_format($o['total'], 2, '.', ','),
-                            'detalle' => array_map(fn ($i) => "#{$i['linea']} {$i['descripcion']}: {$i['cantidad']} × $ ".number_format($i['precio'], 4, '.', ',').' = $ '.number_format($i['total'], 2, '.', ','), $o['items']),
-                        ])->all())
-                        ->columns(4)
-                        ->schema([
-                            TextEntry::make('publicacion')->label('Publicación N.°'),
-                            TextEntry::make('identificacion')->label('RUC / Cédula'),
-                            TextEntry::make('razon_social')->label('Razón Social'),
-                            TextEntry::make('total_texto')->label('Total del proceso'),
-                            TextEntry::make('detalle')->label('Precio por ítem')->bulleted()->columnSpanFull(),
-                        ]),
-                ]),
-            Section::make('Historial de estados')
+                ->columnSpanFull()
                 ->collapsible()
+                // aparece al registrar las ofertas de una publicacion, incluso si fueron 0
+                ->visible(fn ($record) => $record->ofertas()->exists() || $record->publicaciones()->whereNotNull('ofertas_registradas_en')->exists())
                 ->schema([
-                    RepeatableEntry::make('historial')
+                    // las ofertas se agrupan por numero de publicacion; una publicacion sin ofertas muestra "0 ofertas"
+                    RepeatableEntry::make('ofertas_por_publicacion')
                         ->hiddenLabel()
-                        ->columns(4)
+                        ->state(function ($record) {
+                            $porPublicacion = app(ServicioOferta::class)->resumen($record)
+                                ->map(fn ($o) => $o + [
+                                    'total_texto' => '$ '.number_format($o['total'], 2, '.', ','),
+                                    'detalle_tabla' => $o['items'],
+                                    'zip' => $o['archivos'] === [] ? null : ['url' => route('ofertas.descargar_zip', $o['id']), 'archivos' => count($o['archivos'])],
+                                ])
+                                ->groupBy('publicacion');
+
+                            // publicaciones con ofertas registradas (aunque sean 0) o con alguna oferta
+                            return $record->publicaciones()->get()
+                                ->filter(fn ($p) => $p->ofertas_registradas_en !== null || $porPublicacion->has((int) $p->secuencia))
+                                ->map(function ($p) use ($porPublicacion) {
+                                    $ofertas = $porPublicacion->get((int) $p->secuencia, collect());
+
+                                    return [
+                                        'titulo' => 'Publicación N.° '.$p->secuencia.' — '.$ofertas->count().($ofertas->count() === 1 ? ' oferta' : ' ofertas'),
+                                        'ofertas' => $ofertas->values()->all(),
+                                    ];
+                                })->values()->all();
+                        })
                         ->schema([
-                            TextEntry::make('created_at')->label('Fecha')->dateTime('d/m/Y H:i'),
-                            TextEntry::make('transicion.nombre')->label('Acción'),
-                            TextEntry::make('estadoDestino.nombre')->label('Estado resultante')->badge(),
-                            TextEntry::make('usuario.name')->label('Usuario'),
-                            TextEntry::make('comentario')->label('Comentario')->placeholder('-')->columnSpanFull(),
+                            TextEntry::make('titulo')->hiddenLabel()->weight('bold'),
+                            RepeatableEntry::make('ofertas')
+                                ->hiddenLabel()
+                                ->columns(2)
+                                ->schema([
+                                    TextEntry::make('identificacion')->label('RUC / Cédula'),
+                                    TextEntry::make('razon_social')->label('Razón Social'),
+                                    ViewEntry::make('detalle_tabla')->hiddenLabel()->view('filament.infolists.oferta-detalle')->columnSpanFull(),
+                                    TextEntry::make('total_texto')->label('Total del proceso')->columnSpanFull(),
+                                    ViewEntry::make('zip')->hiddenLabel()->view('filament.infolists.oferta-zip')->columnSpanFull(),
+                                ]),
                         ]),
                 ]),
         ]);

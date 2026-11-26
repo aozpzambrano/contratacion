@@ -45,8 +45,17 @@ class ServicioDocumento
      * La unidad requirente carga mientras el proceso es editable (inicio / en correccion);
      * despues solo el analista asignado. Nunca en un proceso finalizado.
      */
+    /** La Comision Tecnica del proceso solo modifica mientras esta en comision; despues queda en solo lectura. */
+    private function comisionSoloLectura(Proceso $proceso, User $usuario): bool
+    {
+        return $usuario->tieneRol('COMISION_TECNICA') && $proceso->estadoProceso?->codigo !== 'EN_COMISION';
+    }
+
     public function puedeSubir(Proceso $proceso, User $usuario): bool
     {
+        if ($this->comisionSoloLectura($proceso, $usuario)) {
+            return false;
+        }
         if (! $usuario->activo || ! $usuario->tienePermiso('documentos.subir')
             || ! $this->puedeVerProceso($proceso, $usuario)) {
             return false;
@@ -123,7 +132,8 @@ class ServicioDocumento
         $estado = $documento->estadoDocumento?->codigo;
 
         if (! $usuario->activo || ! $usuario->tienePermiso('documentos.subir')
-            || ! $this->puedeVerProceso($proceso, $usuario) || $proceso->estadoProceso?->es_final) {
+            || ! $this->puedeVerProceso($proceso, $usuario) || $proceso->estadoProceso?->es_final
+            || $this->comisionSoloLectura($proceso, $usuario)) {
             return false;
         }
 
@@ -147,6 +157,12 @@ class ServicioDocumento
             && $this->puedeVerProceso($documento->proceso, $usuario);
     }
 
+    /** Tipo "Otros documentos": habilitado en todos los estados salvo Inicio, para quien puede subir documentos. */
+    public const TIPO_OTROS = 'OTROS';
+
+    /** En el estado Inicio solo se cargan estos dos tipos. */
+    public const TIPOS_EN_INICIO = ['INFORME_NECESIDAD', 'ESPECIFICACIONES_TECNICAS'];
+
     /** Tipos que el usuario puede cargar en este proceso: de la fase actual y de un rol generador suyo. */
     public function tiposDisponibles(Proceso $proceso, User $usuario): Collection
     {
@@ -163,9 +179,15 @@ class ServicioDocumento
             ->whereHas('estadoDocumento', fn ($query) => $query->where('grupo', '<>', 'anulado'))
             ->pluck('tipo_documento_id');
 
+        $enInicio = $proceso->estadoProceso?->codigo === 'INICIO';
+
         return TipoDocumento::query()
             ->where('activo', true)
-            ->when($this->enRevisionTrasDevolucion($proceso), fn ($query) => $query->where('editable_tras_devolucion', true))
+            ->when($enInicio, fn ($query) => $query->whereIn('codigo', self::TIPOS_EN_INICIO))
+            // tras una devolucion la unidad solo corrige los tipos editables; "Otros documentos" siempre se puede agregar
+            ->when($this->enRevisionTrasDevolucion($proceso), fn ($query) => $query->where(
+                fn ($q) => $q->where('editable_tras_devolucion', true)->orWhere('codigo', self::TIPO_OTROS)
+            ))
             ->where(fn ($query) => $query->where('permite_multiples', true)->orWhereNotIn('id', $tiposYaCargados))
             ->where(fn ($query) => $query->whereNull('fase_id')->orWhere('fase_id', $faseId))
             ->where(fn ($query) => $query->whereNull('rol_generador_id')->orWhereIn('rol_generador_id', $rolesIds))
@@ -253,6 +275,28 @@ class ServicioDocumento
         }
     }
 
+    /**
+     * Titulo de un documento nuevo: el que se haya digitado (si el formulario lo permite) o, en su lugar, el nombre del
+     * archivo cargado (sin la extension). Si el nombre no sirve (vacio, mal codificado), el nombre del tipo de documento.
+     */
+    public function tituloDelDocumento(TipoDocumento $tipo, ?string $digitado, ?string $nombreOriginal): string
+    {
+        if (filled($digitado)) {
+            return mb_substr(trim($digitado), 0, 250);
+        }
+
+        $nombre = trim((string) $nombreOriginal);
+        if ($nombre !== '' && mb_check_encoding($nombre, 'UTF-8')) {
+            $base = pathinfo(str_replace('\\', '/', $nombre), PATHINFO_FILENAME);
+            $base = trim(preg_replace('/[\x00-\x1F\x7F]+/u', '', (string) $base) ?? '');
+            if ($base !== '') {
+                return mb_substr($base, 0, 250);
+            }
+        }
+
+        return $tipo->nombre;
+    }
+
     private function guardar(
         Proceso $proceso,
         TipoDocumento $tipo,
@@ -272,7 +316,7 @@ class ServicioDocumento
                 $nuevo = $documento === null;
 
                 if ($nuevo) {
-                    $documento = new Documento(['titulo' => filled($titulo) ? trim($titulo) : $tipo->nombre]);
+                    $documento = new Documento(['titulo' => $this->tituloDelDocumento($tipo, $titulo, $nombreOriginal)]);
                     $documento->forceFill([
                         'proceso_id' => $proceso->id,
                         'tipo_documento_id' => $tipo->id,

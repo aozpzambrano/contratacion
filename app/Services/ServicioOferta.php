@@ -2,6 +2,7 @@
 
 namespace App\Services;
 
+use App\Models\Archivo;
 use App\Models\Proceso;
 use App\Models\Proveedor;
 use App\Models\User;
@@ -9,6 +10,10 @@ use DomainException;
 use Illuminate\Database\QueryException;
 use Illuminate\Support\Collection;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Storage;
+use Illuminate\Support\Str;
+use Symfony\Component\HttpFoundation\StreamedResponse;
+use Throwable;
 
 /**
  * Ofertas recibidas tras una publicacion: proveedor (RUC/cedula y razon social) y precio unitario por cada item.
@@ -17,6 +22,11 @@ use Illuminate\Support\Facades\DB;
 class ServicioOferta
 {
     public const MAX_OFERTAS = 20;
+
+    /** Archivos que se pueden cargar por oferta (una carpeta del proveedor se sube como varios archivos o como ZIP). */
+    public const MAX_ARCHIVOS_POR_OFERTA = 50;
+
+    public const EXTENSIONES_OFERTA = ['pdf', 'doc', 'docx', 'xls', 'xlsx', 'zip', 'jpg', 'jpeg', 'png'];
 
     public function __construct(private readonly ServicioProceso $procesos) {}
 
@@ -83,10 +93,30 @@ class ServicioOferta
     }
 
     /**
-     * @param  array<int, array{identificacion: string, razon_social: string, precios: array<int|string, mixed>}>  $ofertas
-     *                                                                                                                         precios: id del item del proceso => precio unitario
+     * @param  array<int, array{identificacion: string, razon_social: string, precios: array<int|string, mixed>, archivos: array<int, array{0: string, 1: string}>}>  $ofertas
+     *                                                                                                                         precios: id del item del proceso => precio unitario;
+     *                                                                                                                         archivos: lista de [ruta temporal, nombre original] de la oferta del proveedor (obligatorio)
      */
     public function registrar(Proceso $proceso, User $usuario, array $ofertas): void
+    {
+        $temporales = collect($ofertas)->flatMap(fn ($o) => array_column((array) ($o['archivos'] ?? []), 0))->filter()->all();
+
+        try {
+            $this->registrarOfertas($proceso, $usuario, $ofertas);
+        } catch (Throwable $e) {
+            // la carga se revirtio: no quedan archivos temporales ni definitivos huerfanos
+            Storage::disk(ServicioDocumento::DISCO)->delete($temporales);
+            Storage::disk(ServicioDocumento::DISCO)->delete($this->rutasNuevas);
+            $this->rutasNuevas = [];
+
+            throw $e;
+        }
+    }
+
+    /** @var array<int, string> archivos definitivos creados en la operacion en curso */
+    private array $rutasNuevas = [];
+
+    private function registrarOfertas(Proceso $proceso, User $usuario, array $ofertas): void
     {
         if (! $this->puedeRegistrar($proceso, $usuario)) {
             throw new DomainException('No puede registrar ofertas en este momento.');
@@ -124,7 +154,9 @@ class ServicioOferta
                 }
                 $precios[$item->id] = round((float) $valor, 4);
             }
-            $normalizadas[] = ['identificacion' => $id, 'razon_social' => $razon, 'precios' => $precios];
+            $archivos = $this->validarArchivos($n, (array) ($o['archivos'] ?? []));
+
+            $normalizadas[] = ['identificacion' => $id, 'razon_social' => $razon, 'precios' => $precios, 'archivos' => $archivos];
         }
 
         try {
@@ -149,6 +181,10 @@ class ServicioOferta
                             'proceso_id' => $proceso->id, 'oferta_id' => $ofertaId, 'proceso_item_id' => $itemId, 'precio_unitario' => $precio,
                         ]);
                     }
+                    foreach ($o['archivos'] as [$rutaTemporal, $nombre, $extension]) {
+                        $archivo = $this->almacenar($proceso, $ofertaId, $rutaTemporal, $nombre, $extension, $usuario);
+                        DB::table('oferta_archivos')->insert(['proceso_id' => $proceso->id, 'oferta_id' => $ofertaId, 'archivo_id' => $archivo->id]);
+                    }
                 }
 
                 DB::table('publicaciones')->where('id', $publicacion->id)->update(['ofertas_registradas_en' => DB::raw('now()')]);
@@ -158,7 +194,11 @@ class ServicioOferta
                     'evento' => 'proceso.ofertas_registradas',
                     'entidad' => 'procesos',
                     'entidad_id' => $proceso->id,
-                    'valores_nuevos' => json_encode(['publicacion_id' => $publicacion->id, 'ofertas' => count($normalizadas)]),
+                    'valores_nuevos' => json_encode([
+                        'publicacion_id' => $publicacion->id,
+                        'ofertas' => count($normalizadas),
+                        'archivos' => array_sum(array_map(fn ($o) => count($o['archivos']), $normalizadas)),
+                    ]),
                 ]);
             });
         } catch (QueryException $e) {
@@ -196,7 +236,142 @@ class ServicioOferta
                 'razon_social' => $oferta->proveedor->razon_social,
                 'total' => round(array_sum(array_column($items, 'total')), 4),
                 'items' => $items,
+                'archivos' => $this->archivosDeOferta($oferta->id),
             ];
         });
+    }
+
+    /** @return array<int, array{id: int, nombre: string, tamano: int}> */
+    public function archivosDeOferta(int $ofertaId): array
+    {
+        return DB::table('oferta_archivos as oa')->join('archivos as a', 'a.id', '=', 'oa.archivo_id')
+            ->where('oa.oferta_id', $ofertaId)->orderBy('oa.id')
+            ->get(['a.id', 'a.nombre_original', 'a.tamano_bytes'])
+            ->map(fn ($f) => ['id' => (int) $f->id, 'nombre' => $f->nombre_original, 'tamano' => (int) $f->tamano_bytes])->all();
+    }
+
+    /**
+     * Comprueba los archivos de una oferta: al menos uno, formatos permitidos, no vacios y dentro del tamano maximo.
+     *
+     * @param  array<int, array{0: string, 1: string}>  $archivos
+     * @return array<int, array{0: string, 1: string, 2: string}> [ruta temporal, nombre original, extension]
+     */
+    private function validarArchivos(int $n, array $archivos): array
+    {
+        $archivos = array_values(array_filter($archivos, fn ($a) => ! empty($a[0])));
+        if ($archivos === []) {
+            throw new DomainException("Oferta {$n}: cargue los archivos de la oferta del proveedor.");
+        }
+        if (count($archivos) > self::MAX_ARCHIVOS_POR_OFERTA) {
+            throw new DomainException("Oferta {$n}: máximo ".self::MAX_ARCHIVOS_POR_OFERTA.' archivos por oferta (si son más, súbalos en un ZIP).');
+        }
+
+        $disco = Storage::disk(ServicioDocumento::DISCO);
+        $limiteMb = (int) (DB::selectOne('select parametro_entero(?) as valor', ['tamano_maximo_documento_mb'])->valor ?: 20);
+        $validados = [];
+        foreach ($archivos as $a) {
+            $nombre = basename(str_replace('\\', '/', (string) ($a[1] ?? '')));
+            $nombre = $nombre !== '' && mb_check_encoding($nombre, 'UTF-8') ? $nombre : basename((string) $a[0]);
+            $extension = strtolower(pathinfo($nombre, PATHINFO_EXTENSION));
+
+            if (! in_array($extension, self::EXTENSIONES_OFERTA, true)) {
+                throw new DomainException("Oferta {$n}: el archivo \"{$nombre}\" no es de un tipo permitido (".implode(', ', self::EXTENSIONES_OFERTA).').');
+            }
+            if (! $disco->exists($a[0]) || $disco->size($a[0]) === 0) {
+                throw new DomainException("Oferta {$n}: el archivo \"{$nombre}\" está vacío o no se cargó correctamente.");
+            }
+            if ($disco->size($a[0]) > $limiteMb * 1024 * 1024) {
+                throw new DomainException("Oferta {$n}: el archivo \"{$nombre}\" supera el tamaño máximo permitido ({$limiteMb} MB).");
+            }
+            $validados[] = [$a[0], $nombre, $extension];
+        }
+
+        return $validados;
+    }
+
+    private function almacenar(Proceso $proceso, int $ofertaId, string $rutaTemporal, string $nombre, string $extension, User $usuario): Archivo
+    {
+        $disco = Storage::disk(ServicioDocumento::DISCO);
+        $interno = Str::uuid()->toString().'.'.$extension;
+        $ruta = "procesos/{$proceso->id}/ofertas/{$ofertaId}/{$interno}";
+        $disco->move($rutaTemporal, $ruta);
+        $this->rutasNuevas[] = $ruta;
+
+        $archivo = new Archivo;
+        $archivo->forceFill([
+            'disco' => ServicioDocumento::DISCO,
+            'ruta' => $ruta,
+            'nombre_original' => Str::limit($nombre, 250, ''),
+            'nombre_interno' => $interno,
+            'extension' => $extension,
+            'mime' => $disco->mimeType($ruta) ?: 'application/octet-stream',
+            'tamano_bytes' => $disco->size($ruta),
+            'hash_sha256' => hash('sha256', (string) $disco->get($ruta)),
+            'user_id' => $usuario->id,
+        ])->save();
+
+        return $archivo;
+    }
+
+    private function puedeDescargar(Proceso $proceso, User $usuario): bool
+    {
+        return $usuario->activo
+            && ($usuario->tienePermiso('ofertas.ver') || $usuario->tienePermiso('ofertas.registrar'))
+            && app(ServicioDocumento::class)->puedeVerProceso($proceso, $usuario);
+    }
+
+    /** Descarga todos los archivos de una oferta en un solo ZIP (cada archivo con su nombre original). */
+    public function descargarOfertaZip(int $ofertaId, User $usuario): StreamedResponse
+    {
+        $oferta = DB::table('ofertas as o')->join('proveedores as p', 'p.id', '=', 'o.proveedor_id')
+            ->where('o.id', $ofertaId)->first(['o.id', 'o.proceso_id', 'p.ruc', 'p.razon_social']);
+        abort_if($oferta === null, 404, 'La oferta no existe.');
+        abort_unless($this->puedeDescargar(Proceso::findOrFail($oferta->proceso_id), $usuario), 403, 'No tiene permiso para descargar esta oferta.');
+
+        $archivos = Archivo::query()
+            ->whereIn('id', DB::table('oferta_archivos')->where('oferta_id', $ofertaId)->pluck('archivo_id'))
+            ->orderBy('id')->get();
+        abort_if($archivos->isEmpty(), 404, 'La oferta no tiene archivos.');
+
+        $zipRuta = tempnam(sys_get_temp_dir(), 'oferta_');
+        $zip = new \ZipArchive;
+        abort_unless($zip->open($zipRuta, \ZipArchive::OVERWRITE) === true, 500, 'No se pudo crear el ZIP.');
+        $usados = [];
+        $temporales = [];
+        foreach ($archivos as $a) {
+            $disco = Storage::disk($a->disco);
+            if (! $disco->exists($a->ruta)) {
+                continue;
+            }
+            $local = tempnam(sys_get_temp_dir(), 'ofa_');
+            file_put_contents($local, $disco->get($a->ruta));
+            $temporales[] = $local;
+
+            $nombre = $a->nombre_original;
+            for ($n = 2; in_array($nombre, $usados, true); $n++) {
+                $nombre = pathinfo($a->nombre_original, PATHINFO_FILENAME).'_'.$n.'.'.$a->extension;
+            }
+            $usados[] = $nombre;
+            $zip->addFile($local, $nombre);
+        }
+        $zip->close();
+        abort_if($usados === [], 404, 'Los archivos de la oferta ya no están disponibles.');
+
+        DB::table('auditoria')->insert([
+            'user_id' => $usuario->id,
+            'evento' => 'oferta.zip_descargado',
+            'entidad' => 'ofertas',
+            'entidad_id' => $ofertaId,
+            'valores_nuevos' => json_encode(['archivos' => count($usados)]),
+            'ip' => request()->ip(),
+        ]);
+
+        $nombreZip = 'oferta_'.$oferta->ruc.'_'.Str::slug($oferta->razon_social, '_').'.zip';
+
+        return response()->streamDownload(function () use ($zipRuta, $temporales) {
+            readfile($zipRuta);
+            @unlink($zipRuta);
+            array_map('unlink', array_filter($temporales, 'file_exists'));
+        }, $nombreZip, ['Content-Type' => 'application/zip']);
     }
 }

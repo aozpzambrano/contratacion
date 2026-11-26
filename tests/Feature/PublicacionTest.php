@@ -228,19 +228,49 @@ class PublicacionTest extends TestCase
         $this->assertFalse($fijos->puedeVer($this->proceso->fresh(), $this->analista));
     }
 
-    public function test_el_expediente_trae_marcado_todo_menos_validacion_de_firmas_y_autorizacion(): void
+    public function test_el_expediente_trae_todo_marcado_por_defecto(): void
     {
         $this->cargarTodosLosFijos();
         $this->dejarParaPublicar();
         $servicio = app(ServicioExpedientePublicacion::class);
 
         $opciones = $servicio->opciones($this->proceso);
-        $sinMarcar = $opciones->where('marcado', false)->pluck('etiqueta')->all();
-        sort($sinMarcar);
-        $this->assertSame(['Autorizacion del requerimiento', 'Validacion de firmas electronicas'], $sinMarcar);
-        $this->assertTrue($opciones->contains(fn ($o) => str_starts_with($o['etiqueta'], 'Reglamento Interno') && $o['marcado']));
-        $this->assertTrue($opciones->contains(fn ($o) => str_contains($o['etiqueta'], 'Anexo I') && $o['marcado']));
-        $this->assertCount($opciones->count() - 2, $servicio->marcadasPorDefecto($this->proceso));
+        $this->assertTrue($opciones->isNotEmpty());
+        $this->assertSame([], $opciones->where('marcado', false)->keys()->all(), 'todo viene marcado');
+        $this->assertCount($opciones->count(), $servicio->marcadasPorDefecto($this->proceso));
+        $this->assertTrue($opciones->contains(fn ($o) => str_starts_with($o['etiqueta'], 'Validacion de firmas')));
+        $this->assertTrue($opciones->contains(fn ($o) => str_starts_with($o['etiqueta'], 'Autorizacion del requerimiento')));
+        $this->assertTrue($opciones->contains(fn ($o) => str_starts_with($o['etiqueta'], 'Reglamento Interno')));
+    }
+
+    public function test_la_unidad_genera_el_expediente_cuando_el_proceso_esta_legalizado_sin_los_fijos(): void
+    {
+        $this->cargarTodosLosFijos();
+        $this->remitirLegalizados($this->proceso, $this->unidad);
+        $this->proceso = $this->proceso->fresh();
+        $this->assertSame('LEGALIZADO', $this->proceso->estadoProceso->codigo);
+        $servicio = app(ServicioExpedientePublicacion::class);
+
+        $this->assertTrue($servicio->puedeGenerar($this->proceso, $this->unidad));
+        $claves = $servicio->marcadasPorDefecto($this->proceso, $this->unidad);
+        $this->assertNotEmpty($claves);
+        $this->assertSame([], preg_grep('/^fijo_/', $claves), 'los documentos fijos son solo de Compras');
+        $this->assertCount($servicio->opciones($this->proceso, $this->unidad)->count(), $claves);
+
+        [$ruta] = $servicio->generar($this->proceso, $this->unidad, $claves);
+        $zip = new ZipArchive;
+        $zip->open($ruta);
+        $this->assertGreaterThan(0, $zip->numFiles);
+        $zip->close();
+        @unlink($ruta);
+
+        $this->actingAs($this->unidad);
+        Livewire::test(DocumentosRelationManager::class, ['ownerRecord' => $this->proceso, 'pageClass' => ViewProceso::class])
+            ->assertSee('Generar Expediente');
+
+        // en otros estados (por ejemplo, Para publicar) la unidad ya no lo genera
+        $this->procesos->asignarAnalista($this->proceso->fresh(), $this->analista, $this->jefe);
+        $this->assertFalse($servicio->puedeGenerar($this->proceso->fresh(), $this->unidad));
     }
 
     public function test_el_zip_incluye_lo_elegido_y_rellena_el_anexo_i(): void
@@ -354,6 +384,103 @@ class PublicacionTest extends TestCase
         $this->assertSame(count($nombres), count($sueltos) + count(array_filter($nombres, fn ($n) => str_contains($n, '/'))));
     }
 
+    public function test_el_distributivo_es_obligatorio_para_remitir(): void
+    {
+        $tipos = app(\App\Services\ServicioLegalizacion::class)->tiposAdicionalesPendientes($this->proceso);
+        $this->assertSame(
+            ['DISTRIBUTIVO', 'FICHAS_TECNICAS', 'CERTIFICADO_NO_CATALOGADO', 'VALIDACION_FIRMAS_ELECTRONICAS', 'AUTORIZACION_REQUERIMIENTO'],
+            $tipos->pluck('codigo')->all(),
+            'el modal pide primero el Distributivo y luego las fichas y certificados'
+        );
+
+        // todo menos el Distributivo: la base informa que falta
+        $legalizados = [];
+        foreach (app(ServicioDocumento::class)->documentosPorLegalizar($this->proceso) as $d) {
+            $legalizados[$d->id] = $this->pdfTemporal('l'.$d->id.'.pdf');
+        }
+        $adicionales = [];
+        foreach ($tipos->where('codigo', '!=', 'DISTRIBUTIVO') as $t) {
+            $adicionales[$t->id] = [$this->pdfTemporal($t->codigo.'.pdf')];
+        }
+        try {
+            app(\App\Services\ServicioLegalizacion::class)->remitir(
+                $this->proceso->fresh(), $this->unidad, $legalizados, $this->pdfTemporal('m.pdf'), 'AIL-9', [24], $adicionales
+            );
+            $this->fail('Debio exigir el Distributivo');
+        } catch (DomainException $e) {
+            $this->assertStringContainsString('Distributivo', $e->getMessage());
+        }
+        $this->assertSame('PARA_LEGALIZAR', $this->proceso->fresh()->estadoProceso->codigo);
+
+        // con el Distributivo (un solo archivo Word) se remite
+        $this->remitirLegalizados($this->proceso, $this->unidad, [24], 'AIL-9', [$this->pdfTemporal('distributivo.docx', 'word')]);
+        $this->assertSame('LEGALIZADO', $this->proceso->fresh()->estadoProceso->codigo);
+    }
+
+    public function test_los_documentos_se_muestran_en_el_orden_del_expediente(): void
+    {
+        $this->remitirLegalizados($this->proceso, $this->unidad, [24, 48], 'AIL-GER-2026-001-M', [$this->pdfTemporal('dist.xlsx', 'excel')]);
+        $this->procesos->asignarAnalista($this->proceso->fresh(), $this->analista, $this->jefe);
+        $this->proceso = $this->proceso->fresh();
+        $servicio = app(ServicioExpedientePublicacion::class);
+
+        $orden = Documento::query()->where('proceso_id', $this->proceso->id)
+            ->orderByRaw(ServicioExpedientePublicacion::sqlPosicionTipo())->orderBy('id')
+            ->with('tipoDocumento')->get()->pluck('tipoDocumento.codigo')->unique()->values()->all();
+        $this->assertSame([
+            'INFORME_NECESIDAD', 'ESPECIFICACIONES_TECNICAS', 'DISTRIBUTIVO', 'FICHAS_TECNICAS', 'CERTIFICADO_NO_CATALOGADO',
+            'VALIDACION_FIRMAS_ELECTRONICAS', 'AUTORIZACION_REQUERIMIENTO', 'MEMORANDO_SOLICITUD_PUBLICACION',
+        ], $orden);
+
+        // la tabla de la seccion Documentos sigue ese mismo orden
+        $esperados = Documento::query()->where('proceso_id', $this->proceso->id)
+            ->orderByRaw(ServicioExpedientePublicacion::sqlPosicionTipo())->orderBy('id')->get();
+        $this->actingAs($this->analista);
+        Livewire::test(DocumentosRelationManager::class, ['ownerRecord' => $this->proceso, 'pageClass' => ViewProceso::class])
+            ->assertCanSeeTableRecords($esperados, inOrder: true);
+
+        // la lista para descargar el expediente sigue el mismo orden (los documentos fijos van al final)
+        $etiquetas = $servicio->opciones($this->proceso)->pluck('etiqueta')->values()->all();
+        $posicion = fn (string $texto) => collect($etiquetas)->search(fn ($e) => str_starts_with($e, $texto));
+        $this->assertLessThan($posicion('Especificaciones tecnicas'), $posicion('Informe de necesidad'));
+        $this->assertLessThan($posicion('Distributivo'), $posicion('Especificaciones tecnicas'));
+        $this->assertLessThan($posicion('Fichas tecnicas'), $posicion('Distributivo'));
+        $this->assertLessThan($posicion('Certificado de no catalogado'), $posicion('Fichas tecnicas'));
+        $this->assertLessThan($posicion('Validacion de firmas'), $posicion('Certificado de no catalogado'));
+        $this->assertLessThan($posicion('Autorizacion del requerimiento'), $posicion('Validacion de firmas'));
+        $this->assertLessThan($posicion('Memorando de solicitud'), $posicion('Autorizacion del requerimiento'));
+    }
+
+    public function test_varios_archivos_del_mismo_tipo_quedan_todos_dentro_de_su_carpeta(): void
+    {
+        $this->cargarTodosLosFijos();
+        $this->remitirLegalizados($this->proceso, $this->unidad, [24, 48], 'AIL-GER-2026-001-M', [
+            $this->pdfTemporal('a.xlsx', 'excel'), $this->pdfTemporal('b.xlsx', 'excel'), $this->pdfTemporal('c.docx', 'word'),
+        ]);
+        $this->procesos->asignarAnalista($this->proceso->fresh(), $this->analista, $this->jefe);
+        $this->proceso = $this->proceso->fresh();
+        $servicio = app(ServicioExpedientePublicacion::class);
+
+        // 2 fichas tecnicas (el helper carga dos) y 3 distributivos
+        $this->assertSame(2, Documento::where('proceso_id', $this->proceso->id)->whereHas('tipoDocumento', fn ($q) => $q->where('codigo', 'FICHAS_TECNICAS'))->count());
+
+        [$ruta] = $servicio->generar($this->proceso, $this->analista, $servicio->opciones($this->proceso)->keys()->all());
+        $zip = new ZipArchive;
+        $zip->open($ruta);
+        $nombres = [];
+        for ($i = 0; $i < $zip->numFiles; $i++) {
+            $nombres[] = $zip->getNameIndex($i);
+        }
+        $zip->close();
+        @unlink($ruta);
+
+        $this->assertCount(2, preg_grep('#^04\. Fichas/[^/]+$#u', $nombres), 'las dos fichas en su carpeta');
+        $this->assertCount(3, preg_grep('#^03\. Distributivo/[^/]+$#u', $nombres), 'los tres distributivos en su carpeta');
+        $this->assertCount(count($nombres), array_unique($nombres));
+        // nada de esos tipos queda suelto en la raiz
+        $this->assertEmpty(preg_grep('#^(fichas|distributivo)[^/]*$#i', $nombres));
+    }
+
     public function test_se_puede_incluir_lo_que_viene_sin_marcar_y_no_se_genera_vacio_ni_sin_permiso(): void
     {
         $this->cargarTodosLosFijos();
@@ -413,7 +540,7 @@ class PublicacionTest extends TestCase
         $this->assertDatabaseHas('auditoria', ['evento' => 'proceso.publicacion_registrada', 'entidad_id' => $p->id]);
     }
 
-    public function test_la_fecha_limite_puede_ser_igual_pero_no_anterior_incluida_la_hora(): void
+    public function test_la_fecha_limite_debe_ser_posterior_a_la_de_publicacion_incluida_la_hora(): void
     {
         $this->dejarParaPublicar();
 
@@ -421,11 +548,20 @@ class PublicacionTest extends TestCase
             $this->publicar(['desde' => '2026-12-05 10:00', 'hasta' => '2026-12-05 09:59']);
             $this->fail('La fecha limite no puede ser anterior');
         } catch (DomainException $e) {
-            $this->assertStringContainsString('anterior a la Fecha de Publicación', $e->getMessage());
+            $this->assertStringContainsString('posterior a la Fecha de Publicación', $e->getMessage());
         }
         $this->assertSame('PARA_PUBLICAR', $this->proceso->fresh()->estadoProceso->codigo);
 
-        $this->publicar(['desde' => '2026-12-05 10:00', 'hasta' => '2026-12-05 10:00']);
+        // igual tampoco vale: debe ser posterior
+        try {
+            $this->publicar(['desde' => '2026-12-05 10:00', 'hasta' => '2026-12-05 10:00']);
+            $this->fail('La fecha limite no puede ser igual');
+        } catch (DomainException $e) {
+            $this->assertStringContainsString('posterior a la Fecha de Publicación', $e->getMessage());
+        }
+        $this->assertSame('PARA_PUBLICAR', $this->proceso->fresh()->estadoProceso->codigo);
+
+        $this->publicar(['desde' => '2026-12-05 10:00', 'hasta' => '2026-12-05 10:01']);
         $this->assertSame('PUBLICADO', $this->proceso->fresh()->estadoProceso->codigo);
     }
 
@@ -500,10 +636,10 @@ class PublicacionTest extends TestCase
         Livewire::test(ViewProceso::class, ['record' => $this->proceso->getRouteKey()])
             ->assertActionVisible('transicion_publicar')
             ->assertSee('Documentos fijos')
-            // fecha limite anterior: el formulario la rechaza
+            // fecha limite igual o anterior: el formulario la rechaza
             ->callAction('transicion_publicar', [
                 'necesidad' => 'Necesidad X', 'enlace' => 'https://sitio.ec/p/1',
-                'fecha_publicacion' => '2026-12-10 09:00', 'fecha_limite' => '2026-12-10 08:59',
+                'fecha_publicacion' => '2026-12-10 09:00', 'fecha_limite' => '2026-12-10 09:00',
             ])
             ->assertHasActionErrors(['fecha_limite']);
         $this->assertSame('PARA_PUBLICAR', $this->proceso->fresh()->estadoProceso->codigo);
@@ -511,7 +647,7 @@ class PublicacionTest extends TestCase
         // con el error el modal queda abierto: se reintenta en una pantalla nueva
         Livewire::test(ViewProceso::class, ['record' => $this->proceso->getRouteKey()])->callAction('transicion_publicar', [
             'necesidad' => 'Necesidad X', 'enlace' => 'https://sitio.ec/p/1',
-            'fecha_publicacion' => '2026-12-10 09:00', 'fecha_limite' => '2026-12-10 09:00',
+            'fecha_publicacion' => '2026-12-10 09:00', 'fecha_limite' => '2026-12-10 09:01',
         ])->assertHasNoActionErrors();
 
         $this->assertSame('PUBLICADO', $this->proceso->fresh()->estadoProceso->codigo);
@@ -530,12 +666,12 @@ class PublicacionTest extends TestCase
         foreach ([$this->analista, $this->jefe] as $compras) {
             $this->actingAs($compras);
             Livewire::test(DocumentosRelationManager::class, ['ownerRecord' => $this->proceso->fresh(), 'pageClass' => ViewProceso::class])
-                ->assertSee('Generar Expediente Publicación');
+                ->assertSee('Generar Expediente');
         }
 
         $this->actingAs($this->unidad);
         Livewire::test(DocumentosRelationManager::class, ['ownerRecord' => $this->proceso->fresh(), 'pageClass' => ViewProceso::class])
-            ->assertDontSee('Generar Expediente Publicación');
+            ->assertDontSee('Generar Expediente');
         Livewire::test(ViewProceso::class, ['record' => $this->proceso->getRouteKey()])
             ->assertDontSee('Documentos fijos');
     }

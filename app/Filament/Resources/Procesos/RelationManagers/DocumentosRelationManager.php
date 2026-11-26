@@ -17,6 +17,7 @@ use Filament\Forms\Components\Textarea;
 use Filament\Forms\Components\TextInput;
 use Filament\Notifications\Notification;
 use Filament\Resources\RelationManagers\RelationManager;
+use Filament\Schemas\Components\Utilities\Get;
 use Filament\Tables\Columns\TextColumn;
 use Filament\Tables\Table;
 
@@ -42,8 +43,14 @@ class DocumentosRelationManager extends RelationManager
 
         return $table
             ->recordTitleAttribute('titulo')
-            ->modifyQueryUsing(fn ($query) => $query->with(['tipoDocumento', 'estadoDocumento', 'versionActual', 'creador']))
-            ->defaultSort('id')
+            // la relacion ya ordena por id: se descarta ese orden para seguir el del expediente de publicacion
+            ->modifyQueryUsing(fn ($query) => $query
+                ->with(['tipoDocumento', 'estadoDocumento', 'versionActual', 'creador'])
+                // los documentos eliminados (anulados) ya no se listan; quedan en el historial de estados
+                ->whereHas('estadoDocumento', fn ($e) => $e->where('grupo', '<>', 'anulado'))
+                ->reorder()
+                ->orderByRaw(ServicioExpedientePublicacion::sqlPosicionTipo())
+                ->orderBy('documentos.id'))
             ->emptyStateHeading('Aún no hay documentos cargados')
             ->columns([
                 TextColumn::make('tipoDocumento.nombre')->label('Tipo'),
@@ -63,12 +70,18 @@ class DocumentosRelationManager extends RelationManager
                         Select::make('tipo_documento_id')
                             ->label('Tipo de documento')
                             ->options(fn () => $servicio->tiposDisponibles($this->getOwnerRecord(), auth()->user()))
+                            ->live()
+                            ->afterStateUpdated(fn ($set) => $set('archivo', null))
                             ->required(),
                         TextInput::make('titulo')
                             ->label('Título')
                             ->maxLength(250)
-                            ->helperText('Opcional: si lo deja vacío se usa el nombre del tipo.'),
-                        $this->campoArchivo(),
+                            ->helperText('Opcional: si lo deja vacío se usa el nombre del archivo.'),
+                        // el selector acepta solo los formatos del tipo elegido
+                        $this->campoArchivo()
+                            ->disabled(fn (Get $get) => blank($get('tipo_documento_id')))
+                            ->label(fn (Get $get) => $this->etiquetaArchivo(TipoDocumento::find($get('tipo_documento_id'))))
+                            ->acceptedFileTypes(fn (Get $get) => TipoDocumento::find($get('tipo_documento_id'))?->mimesPermitidos() ?? []),
                         Textarea::make('comentario')->label('Comentario de la versión')->rows(2),
                     ])
                     ->action(function (array $data) use ($servicio) {
@@ -87,19 +100,19 @@ class DocumentosRelationManager extends RelationManager
                         $this->recargarPagina();
                     }),
                 Action::make('generar_expediente_publicacion')
-                    ->label('Generar Expediente Publicación')
+                    ->label('Generar Expediente')
                     ->icon('heroicon-o-archive-box-arrow-down')
                     ->color('success')
                     ->visible(fn () => app(ServicioExpedientePublicacion::class)->puedeGenerar($this->getOwnerRecord(), auth()->user()))
-                    ->modalHeading('Generar Expediente Publicación')
-                    ->modalDescription('Marque los documentos que irán en el archivo .zip. La Validación de Firmas Electrónicas y la Autorización del Requerimiento vienen sin marcar.')
+                    ->modalHeading('Generar Expediente')
+                    ->modalDescription('Todos los documentos vienen marcados; desmarque los que no desee incluir en el archivo .zip.')
                     ->modalSubmitActionLabel('Generar y descargar')
                     ->modalWidth('2xl')
-                    ->fillForm(fn () => ['elementos' => app(ServicioExpedientePublicacion::class)->marcadasPorDefecto($this->getOwnerRecord())])
+                    ->fillForm(fn () => ['elementos' => app(ServicioExpedientePublicacion::class)->marcadasPorDefecto($this->getOwnerRecord(), auth()->user())])
                     ->schema(fn () => [
                         CheckboxList::make('elementos')
                             ->label('Documentos')
-                            ->options(app(ServicioExpedientePublicacion::class)->opciones($this->getOwnerRecord())->pluck('etiqueta', 'clave'))
+                            ->options(app(ServicioExpedientePublicacion::class)->opciones($this->getOwnerRecord(), auth()->user())->pluck('etiqueta', 'clave'))
                             ->required(),
                     ])
                     ->action(function (array $data) {
@@ -156,8 +169,10 @@ class DocumentosRelationManager extends RelationManager
                     ->icon('heroicon-o-document-plus')
                     ->color('warning')
                     ->visible(fn (Documento $record) => $servicio->puedeAgregarVersion($record, auth()->user()))
-                    ->schema([
-                        $this->campoArchivo(),
+                    ->schema(fn (Documento $record) => [
+                        $this->campoArchivo()
+                            ->label($this->etiquetaArchivo($record->tipoDocumento))
+                            ->acceptedFileTypes($record->tipoDocumento->mimesPermitidos()),
                         Textarea::make('comentario')->label('Qué cambió en esta versión')->rows(2),
                     ])
                     ->action(function (array $data, Documento $record) use ($servicio) {
@@ -181,6 +196,11 @@ class DocumentosRelationManager extends RelationManager
             ->storeFileNamesIn('nombre_original')
             ->helperText('Tamaño máximo según la configuración del sistema (por defecto 20 MB).')
             ->required();
+    }
+
+    private function etiquetaArchivo(?TipoDocumento $tipo): string
+    {
+        return $tipo ? "Archivo ({$tipo->formatosLegibles()})" : 'Archivo (seleccione primero el tipo de documento)';
     }
 
     /** @return array{0: string, 1: string} ruta temporal y nombre original */

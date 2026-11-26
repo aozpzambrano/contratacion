@@ -70,8 +70,8 @@ class ServicioPublicacion
         }
         $desde = $this->fecha($fechaPublicacion, 'la Fecha y hora de Publicación');
         $hasta = $this->fecha($fechaLimite, 'la Fecha y hora Límite');
-        if ($hasta->lt($desde)) {
-            throw new DomainException('La Fecha Límite no puede ser anterior a la Fecha de Publicación.');
+        if ($hasta->lte($desde)) {
+            throw new DomainException('La Fecha Límite debe ser posterior a la Fecha de Publicación.');
         }
 
         try {

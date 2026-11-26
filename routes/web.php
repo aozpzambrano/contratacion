@@ -14,3 +14,10 @@ Route::get('/documentos/versiones/{version}/descargar', \App\Http\Controllers\De
 Route::get('/documentos/{documento}/legalizado/descargar', \App\Http\Controllers\DescargaLegalizadoController::class)
     ->middleware('web')
     ->name('documentos.descargar_legalizado');
+
+
+// Todos los archivos de una oferta en un ZIP.
+Route::get('/ofertas/{oferta}/descargar-zip', \App\Http\Controllers\DescargaOfertaZipController::class)
+    ->whereNumber('oferta')
+    ->middleware('web')
+    ->name('ofertas.descargar_zip');

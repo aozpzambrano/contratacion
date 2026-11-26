@@ -317,7 +317,7 @@ Umbrales de designación (100.000 y 500.000) viven en `tipos_designacion.monto_m
 
 ### 7.1 Roles iniciales (referenciales)
 
-`ADMIN` Administrador del sistema · `UNIDAD_REQUIRENTE` · `COMPRAS` · `COMISION_TECNICA` · `SERVIDOR_AFIN` (delegado) · `FINANCIERO` · `JURIDICO` · `ADMIN_CONTRATO` · `CONSULTA`
+`ADMIN` Administrador del sistema · `UNIDAD_REQUIRENTE` · `COMPRAS` · `COMISION_TECNICA` · `ADMIN_CONTRATO` · `CONSULTA`
 
 Derivados de los carriles de Bizagi (Unidad Requirente, Compras, Comisión Técnica) y de la columna AD del Excel (delegado, financiero, jurídico). Son ajustables.
 
@@ -427,7 +427,7 @@ Capa 3 de autorización (asignación al registro), implementada en `Proceso::sco
 | `COMPRAS_ANALISTA` | Solo donde tiene una asignación activa (`asignaciones_proceso`) |
 | `UNIDAD_REQUIRENTE` | Los que creó y su documentación |
 | `ADMIN`, `CONSULTA` | Todos (supuesto, por sus funciones de administración y consulta) |
-| Comisión, Servidor afín, Financiero, Jurídico, Administrador de contrato | Solo donde tienen una asignación activa (supuesto) |
+| Comisión, Administrador de contrato | Solo donde tienen una asignación activa (supuesto) |
 
 Al crear un proceso, quien lo crea queda asignado como `UNIDAD_REQUIRENTE` en la fase Preparatoria; así puede ejercer permisos que exigen asignación (p. ej. enviar a revisión).
 Los datos del proceso solo se editan en los estados `INICIO` y `EN_CORRECCION` (supuesto, constante `Proceso::ESTADOS_EDITABLES`).
@@ -613,6 +613,52 @@ Tras publicar solo aparece **Ofertas**; los botones de decisión se habilitan **
 
 ## 25. Distributivo y expediente de publicación en carpetas (Entrega E4b)
 
-**Distributivo.** Nuevo tipo de documento (`DISTRIBUTIVO`, PDF, Word o Excel, admite varios por proceso, sin revisión ni legalización). La unidad lo adjunta —uno o varios archivos, opcional— en el modal de *Remitir documentos legalizados* (también al remitir en Para Re-publicar). Si se quiere obligatorio basta agregarlo a los "Documentos obligatorios" de la transición (`remitir_legalizados`, `remitir_correccion`, `remitir_republicacion`).
+**Distributivo.** Nuevo tipo de documento (`DISTRIBUTIVO`, PDF, Word o Excel, admite varios por proceso, sin revisión ni legalización). La unidad lo adjunta —uno o varios archivos, **obligatorio** (E4c)— en el modal de *Remitir documentos legalizados* (también al remitir en Para Re-publicar). Es requisito de `remitir_legalizados`, `remitir_correccion` y `remitir_republicacion`; si el proceso ya tiene uno (p. ej. en Para Re-publicar) el campo queda opcional para agregar más.
 
 **Generar Expediente Publicación.** El zip agrupa los documentos del proceso en carpetas por tipo: `01. Informe de Necesidad`, `02. Especificaciones Técnicas`, `03. Distributivo`, `04. Fichas`, `05. Certificado de no catalogado`, `06. Validación de Firmas`, `07. Autorización del Requerimiento`. El memorando de solicitud de publicación, los demás documentos y los documentos fijos van sueltos, sin numeración y sin carpeta. El mapa está en `ServicioExpedientePublicacion::CARPETAS`.
+
+**Orden de los documentos (E4c).** Informe de necesidad, Especificaciones técnicas, Distributivo, Fichas, Certificado de no catalogado, Validación de firmas electrónicas, Autorización del requerimiento y Memorando de solicitud de publicación (`ServicioExpedientePublicacion::ORDEN_TIPOS`). Es el orden de los campos del modal de la unidad, de la tabla de Documentos y de la lista para descargar el expediente. En el zip, todos los archivos de un mismo tipo quedan dentro de su carpeta (el sufijo `_2`, `_3` de los nombres repetidos conserva la carpeta).
+
+**Título de los documentos y botón de devolución (E4c).** Al cargar un documento nuevo, su título es el que el usuario haya digitado (solo existe ese campo al subir de uno en uno); si no, el **nombre del archivo** sin extensión (cada archivo de una carga múltiple toma el suyo, sin pedir nombres); y si el nombre no sirve (vacío o mal codificado), el nombre del tipo de documento (`ServicioDocumento::tituloDelDocumento`). En el zip, dentro de su carpeta el archivo se llama como el archivo cargado. "Devolver a la unidad requirente" se muestra al final de la fila de acciones del proceso.
+
+## 26. Archivos de la oferta y valor unitario en la ficha (Entrega E4d)
+
+Al registrar las ofertas, al final de cada oferta el analista **carga los archivos del proveedor** (obligatorio, hasta 50 por oferta; PDF, Word, Excel, imágenes o ZIP). Una carpeta se arrastra completa al cargador (cada archivo queda cargado, con su nombre original) o se sube comprimida en un ZIP. Se guardan en `archivos` (ruta `procesos/{proceso}/ofertas/{oferta}/`) y se enlazan en la tabla nueva `oferta_archivos`. Si algo falla se revierte todo y no quedan archivos huérfanos. Los archivos **no se descargan de uno en uno**: solo existe la descarga de la oferta completa en ZIP (`ofertas.descargar_zip`), que exige `ofertas.ver` u `ofertas.registrar` y que el usuario vea el proceso.
+
+En la ficha del proceso, cada oferta muestra: Publicación N.°, RUC/Cédula y Razón Social; el *Detalle por ítem* (Ítem, Cantidad, **Valor unitario registrado**, Total del ítem); el *Total del proceso*; y *Oferta del proveedor* con el botón de descarga en ZIP.
+
+Cada oferta tiene el botón **Descargar oferta (ZIP)** (`ofertas.descargar_zip`): reúne todos sus archivos con su nombre original (los repetidos reciben sufijo `_2`, `_3`) y deja auditoría (`oferta.zip_descargado`). Mismo permiso y visibilidad que la descarga individual.
+
+## 27. Remitir ofertas con dos PDF obligatorios (Entrega E5)
+
+El botón **Remitir ofertas** (Publicado → Para documentación) abre un formulario con tres PDF obligatorios: **Necesidad de Contratación Finalizada**, **Memorando de Solicitud de la Designación de la Comisión** y **Memorando de Designación de la Comisión**. Los registra `ServicioRemisionOfertas` como documentos ya legalizados (tipos `NECESIDAD_CONTRATACION_FINALIZADA`, `MEMORANDO_SOLICITUD_DESIGNACION_COMISION` y `MEMORANDO_DESIGNACION_COMISION`, solo PDF, varios por proceso para los siguientes ciclos) y aplica la transición. La base lo exige: `transicion_proceso_requisitos` pide los tres tipos en estado LEGALIZADO para `remitir_ofertas`, de modo que la transición ya no puede aplicarse sin ellos. Lo remite el analista asignado (permisos `procesos.autorizar_transicion` y `documentos.registrar_legalizado`). Si falta un archivo o algo falla, el proceso no cambia y no quedan temporales.
+
+## 28. Ajustes de la devolución, el expediente y la ficha (Entrega E5b)
+
+- **Tipos editables tras la devolución:** Distributivo, Fichas técnicas, Certificado de no catalogado, Validación de firmas electrónicas y Autorización del requerimiento (`tipos_documento.editable_tras_devolucion`). Con el proceso en *Para revisión*, la unidad requirente puede en la sección Documentos subir **nueva versión**, **eliminar** (anular, con motivo) y **añadir más documentos** de esos cinco tipos; Informe de necesidad, Especificaciones técnicas y el Memorando no se tocan.
+- **Generar Expediente:** el botón (antes "Generar Expediente Publicación") ahora también lo tiene la **unidad requirente** cuando el proceso está **Legalizado** (permiso `expedientes.descargar`); su zip lleva solo los documentos del proceso, sin los documentos fijos (esos son de Compras). En el modal **todos los documentos vienen marcados** por defecto.
+- **Ficha:** se retiró el enlace "Ampliar a todo el ancho" de la sección Ítems; "Asignar analista" usa el color del tema.
+
+## 29. Documentos eliminados, formatos por tipo y fechas de publicación (Entrega E5c)
+
+- **Eliminar documento:** el documento anulado deja de listarse en *Documentos* (la fila se conserva en la base como respaldo). `aplicar_transicion_documento('anular')` registra además un movimiento en el *Historial de estados* del proceso (transición no operable `eliminar_documento`, `activo = false`) con el tipo, el título y el motivo; no cambia el estado del proceso.
+- **Formatos por tipo:** en *Subir documento* y *Nueva versión*, el selector de archivos acepta solo los formatos del tipo elegido (`TipoDocumento::mimesPermitidos()`), y la etiqueta los indica; antes se podía elegir cualquier PDF/Word/Excel y el rechazo llegaba al guardar. La validación del servidor se mantiene.
+- **Publicar:** la Fecha de Publicación y la Fecha Límite usan el selector nativo del navegador, que permite escribir con el teclado además de elegir en el calendario. El cálculo automático de la fecha límite no se implementó (requiere un calendario de feriados).
+
+## 30. Roles retirados y aviso de designación (Entrega E5g)
+
+- **Roles:** se eliminan `SERVIDOR_AFIN`, `FINANCIERO` y `JURIDICO` (con sus permisos y fases). Quedan 7 roles. La tarea del flujo `SERVIDOR_AFIN_DELEGADO` queda sin rol responsable. Los tipos de designación (`DELEGADO`, `COMISION`, `COMISION_FINANCIERO_JURIDICO`) se conservan como catálogo.
+- **Aviso informativo:** con las ofertas registradas y antes de remitirlas, el Jefe/Analista de Compras ve, sobre *Proceso* e *Ítems*, la sección *Designación sugerida*, según el mayor monto total entre las ofertas recibidas del ciclo (`tipo_designacion_sugerido`): menor a 100.000 → Servidor Afín; desde 100.000 y menor a 500.000 → Comisión Técnica; desde 500.000 → Comisión Técnica + Financiero + Jurídico. Un monto exactamente igual a 500.000 se clasifica en esta última (regla `monto_minimo <= monto`).
+- **Remitir ofertas:** pide tres PDF (ver sección 27); el tipo `ACTA_RECEPCION_OFERTAS` se reemplaza por los dos memorandos.
+
+## 31. Comisión Técnica por proceso e informes (Entrega E5h)
+
+- **Horas de publicación:** solo 24 o múltiplos de 24 (no existen días de 25 horas). Lo valida el formulario, `ServicioLegalizacion` y un CHECK en `solicitud_publicacion_detalle` (`horas % 24 = 0`).
+- **Remitir ofertas** (Publicado → *En comisión técnica*, fase Precontractual): se cargan los tres PDF (sección 30) y, al grabarlos, `ServicioRemisionOfertas` crea el usuario de la comisión (`comision.<año>.<número del proceso>@ailep.com`, p. ej. `comision.2026.001@ailep.com`; si ese correo ya es de otro proceso se usa el código completo; nombre «Comisión Técnica <código>»), con rol `COMISION_TECNICA`, asignado al proceso y con clave inicial igual al usuario (`comision.2026.001`), que se guarda cifrada y se muestra al remitir. La columna `users.debe_cambiar_clave` obliga a cambiarla en el primer ingreso (middleware `ExigirCambioClave` y página *Cambiar clave*). Si el proceso se vuelve a remitir tras una devolución, se reutiliza y reactiva el usuario con una clave nueva. **Ya no pasa por la Unidad Requirente:** desaparecen los estados *Para documentación* y *Para comisión* y las transiciones `remitir_documentacion` e `iniciar_comision`.
+- **Qué ve la comisión:** Proceso, Ítems, Ofertas y Documentos, con *Generar Expediente*; no ve solicitud de publicación, publicaciones ni historial. Permisos nuevos del rol: `procesos.remitir_informe`, `expedientes.descargar`, `documentos.registrar_legalizado`.
+- **Remitir Informe** (`ServicioInformeComision`, un PDF por documento, todos legalizados):
+  - *Informe de Recomendación de Devolución de Expediente* → Memorando de remisión de informe + Informe de devolución; registra la devolución y el proceso pasa a *Para reapertura* (`remitir_informe_devolucion`).
+  - *Informe de Recomendación de Selección de Proveedor* → Memorando de remisión + Informe + Acta de Constancia de Recepción de Ofertas + Validación de firmas; el proceso pasa a *Aprobado* (`remitir_informe_seleccion`).
+  - Los requisitos están en `transicion_proceso_requisitos`. Al terminar, el usuario de la comisión sigue activo y asignado, pero en solo lectura: ya no remite informes ni carga documentos.
+- Tipos de documento nuevos: `MEMORANDO_REMISION_INFORME`, `ACTA_RECEPCION_OFERTAS`, `VALIDACION_FIRMAS_INFORME`; los dos informes dejan de requerir revisión.
+

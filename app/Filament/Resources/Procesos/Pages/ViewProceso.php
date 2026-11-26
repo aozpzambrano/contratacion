@@ -12,7 +12,8 @@ use App\Services\ServicioLegalizacion;
 use App\Services\ServicioOferta;
 use App\Services\ServicioPublicacion;
 use App\Services\ServicioProceso;
-use App\Services\ServicioRemisionDocumentacion;
+use App\Services\ServicioInformeComision;
+use App\Services\ServicioRemisionOfertas;
 use DomainException;
 use Filament\Actions\Action;
 use Filament\Actions\ActionGroup;
@@ -41,6 +42,7 @@ class ViewProceso extends ViewRecord
         $usuario = auth()->user();
         $proceso = $this->getRecord();
         $acciones = [];
+        $devoluciones = []; // "Devolver a la unidad requirente" va al final de la fila para no pulsarlo por error
 
         // Transiciones del flujo disponibles para este usuario en el estado actual
         foreach ($servicio->transicionesDisponibles($proceso, $usuario) as $transicion) {
@@ -53,7 +55,12 @@ class ViewProceso extends ViewRecord
 
             // Decisiones del flujo, solo despues de registrar las ofertas de la ultima publicacion (las calcula la BD):
             // "Remitir ofertas", "Publicar" de nuevo o devolver el expediente (formulario propio, ver mas abajo).
-            if ($transicion->codigo === 'remitir_ofertas' && ! app(ServicioOferta::class)->puedeRemitir($proceso)) {
+            if ($transicion->codigo === 'remitir_ofertas') {
+                // Remitir ofertas pide tres PDF (Necesidad finalizada y los dos memorandos de la comision): formulario propio
+                if (app(ServicioRemisionOfertas::class)->puedeRemitir($proceso, $usuario)) {
+                    $acciones[] = $this->accionRemitirOfertas($proceso, $usuario);
+                }
+
                 continue;
             }
 
@@ -62,10 +69,8 @@ class ViewProceso extends ViewRecord
                 continue;
             }
 
-            // La unidad carga Estudio de Mercado y Certificacion POA (formulario propio)
-            if ($transicion->codigo === 'remitir_documentacion') {
-                $acciones[] = $this->accionRemitirDocumentacion($proceso, $usuario);
-
+            // La Comision Tecnica remite su informe (formulario propio)
+            if (in_array($transicion->codigo, ServicioInformeComision::TRANSICIONES, true)) {
                 continue;
             }
 
@@ -80,7 +85,7 @@ class ViewProceso extends ViewRecord
                 continue;
             }
 
-            $acciones[] = Action::make('transicion_'.$transicion->codigo)
+            $accion = Action::make('transicion_'.$transicion->codigo)
                 ->label($transicion->nombre)
                 ->color($transicion->requiere_comentario ? 'warning' : 'primary')
                 ->modalHeading($transicion->nombre)
@@ -92,6 +97,12 @@ class ViewProceso extends ViewRecord
                     ),
                         'Estado actualizado: '.$transicion->estadoDestino->nombre);
                 });
+
+            if (in_array($transicion->codigo, ['devolver_legalizacion', 'devolver_publicacion'], true)) {
+                $devoluciones[] = $accion;
+            } else {
+                $acciones[] = $accion;
+            }
         }
 
         // Compras genera el codigo antes de publicar
@@ -110,7 +121,6 @@ class ViewProceso extends ViewRecord
         if ($servicio->puedeAsignarAnalista($proceso, $usuario)) {
             $acciones[] = Action::make('asignar_analista')
                 ->label('Asignar analista')
-                ->color('gray')
                 ->schema([
                     Select::make('analista_id')
                         ->label('Analista de Compras')
@@ -131,6 +141,10 @@ class ViewProceso extends ViewRecord
 
         if (app(ServicioDevolucionSinOfertas::class)->puedeDevolver($proceso, $usuario)) {
             $acciones[] = $this->accionDevolverSinOfertas($proceso, $usuario);
+        }
+
+        if (app(ServicioInformeComision::class)->puedeRemitir($proceso, $usuario)) {
+            $acciones[] = $this->accionRemitirInforme($proceso, $usuario);
         }
 
         // Documentos fijos del tipo de proceso (reglamento, orden de compra, anexos) para Compras
@@ -154,7 +168,7 @@ class ViewProceso extends ViewRecord
 
         $acciones[] = EditAction::make();
 
-        return $acciones;
+        return array_merge($acciones, $devoluciones);
     }
 
     private function filaOferta(Proceso $proceso): array
@@ -224,6 +238,29 @@ class ViewProceso extends ViewRecord
                         Text::make(fn (Get $get) => 'Total del proceso: '.self::dinero(
                             collect((array) $get('precios'))->sum(fn ($p) => (float) ($p['cantidad'] ?? 0) * (float) ($p['precio'] ?? 0))
                         ))->columnSpanFull(),
+                        // Al final de cada oferta: los archivos del proveedor. Una carpeta se arrastra completa (cada archivo
+                        // queda cargado) o se sube comprimida en un ZIP.
+                        Hidden::make('nombres_archivos'),
+                        FileUpload::make('archivos')
+                            ->label('Oferta del proveedor (arrastre la carpeta o seleccione los archivos)')
+                            ->helperText('PDF, Word, Excel, imágenes o ZIP. Puede cargar varios archivos a la vez; los nombres se conservan.')
+                            ->disk(ServicioDocumento::DISCO)
+                            ->directory('temporal')
+                            ->visibility('private')
+                            ->acceptedFileTypes([
+                                'application/pdf',
+                                'application/msword',
+                                'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+                                'application/vnd.ms-excel',
+                                'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+                                'application/zip', 'application/x-zip-compressed',
+                                'image/jpeg', 'image/png',
+                            ])
+                            ->multiple()
+                            ->maxFiles(ServicioOferta::MAX_ARCHIVOS_POR_OFERTA)
+                            ->storeFileNamesIn('nombres_archivos')
+                            ->columnSpanFull()
+                            ->required(),
                     ]),
             ])
             ->action(function (array $data) use ($proceso, $usuario) {
@@ -231,6 +268,7 @@ class ViewProceso extends ViewRecord
                     'identificacion' => (string) ($o['identificacion'] ?? ''),
                     'razon_social' => (string) ($o['razon_social'] ?? ''),
                     'precios' => collect((array) ($o['precios'] ?? []))->mapWithKeys(fn ($p) => [(int) $p['item_id'] => $p['precio'] ?? null])->all(),
+                    'archivos' => $this->archivosConNombre((array) ($o['archivos'] ?? []), (array) ($o['nombres_archivos'] ?? [])),
                 ])->all();
 
                 $this->ejecutar(fn () => app(ServicioOferta::class)->registrar($proceso, $usuario, $ofertas), 'Ofertas registradas');
@@ -263,16 +301,16 @@ class ViewProceso extends ViewRecord
                     ->required(),
                 DateTimePicker::make('fecha_publicacion')
                     ->label('Fecha de Publicación')
-                    ->native(false)
-                    ->displayFormat('d/m/Y H:i')->seconds(false)
+                    ->native()
+                    ->seconds(false)
                     ->live()
                     ->required(),
                 DateTimePicker::make('fecha_limite')
                     ->label('Fecha Límite')
-                    ->helperText('Fecha y hora; debe ser igual o posterior a la Fecha de Publicación.')
-                    ->native(false)
-                    ->displayFormat('d/m/Y H:i')->seconds(false)
-                    ->afterOrEqual('fecha_publicacion')
+                    ->helperText('Debe ser posterior a la Fecha de Publicación.')
+                    ->native()
+                    ->seconds(false)
+                    ->after('fecha_publicacion')
                     ->required(),
             ])
             ->action(function (array $data) use ($servicio, $proceso, $usuario) {
@@ -289,7 +327,7 @@ class ViewProceso extends ViewRecord
      */
     private function accionRemitirLegalizados(Proceso $proceso, User $usuario): Action
     {
-        $pendientes = app(ServicioDocumento::class)->documentosPorLegalizar($proceso);
+        $pendientes = app(ServicioDocumento::class)->documentosPorLegalizar($proceso)->load('tipoDocumento:id,nombre');
 
         $pdf = fn (string $nombre, string $etiqueta, ?string $guardaNombre = null) => FileUpload::make($nombre)
             ->label($etiqueta)
@@ -302,23 +340,14 @@ class ViewProceso extends ViewRecord
 
         $campos = [];
         foreach ($pendientes as $documento) {
-            $campos[] = $pdf("legalizado_{$documento->id}", "{$documento->titulo} legalizado (PDF firmado electrónicamente)");
+            // la etiqueta es el nombre del tipo (Informe de Necesidad, Especificaciones Técnicas), no el nombre del archivo
+            $campos[] = $pdf("legalizado_{$documento->id}", "{$documento->tipoDocumento->nombre} legalizado (PDF firmado electrónicamente)");
         }
-        $campos[] = $pdf('memorando', 'Memorando de solicitud de publicación (PDF)');
-        // Fichas tecnicas, certificados, etc. (varios archivos por tipo); solo los que aun no se han cargado
+        // Orden: legalizados (Informe, Especificaciones), Distributivo, Fichas, Certificado, Validacion, Autorizacion y Memorando
         $adicionales = app(ServicioLegalizacion::class)->tiposAdicionalesPendientes($proceso);
-        foreach ($adicionales as $tipo) {
-            $campos[] = FileUpload::make("adicional_{$tipo->id}")
-                ->label($tipo->nombre.' (PDF, puede adjuntar varios)')
-                ->disk(ServicioDocumento::DISCO)
-                ->directory('temporal')
-                ->visibility('private')
-                ->acceptedFileTypes(['application/pdf'])
-                ->multiple()
-                ->storeFileNamesIn("nombre_adicional_{$tipo->id}")
-                ->required();
-        }
-        // Distributivo: uno o varios archivos PDF, Word o Excel (opcional)
+        $distributivoPendiente = $adicionales->contains('codigo', ServicioLegalizacion::TIPO_DISTRIBUTIVO);
+
+        // Distributivo: uno o varios archivos PDF, Word o Excel (obligatorio mientras el proceso no tenga uno)
         $campos[] = FileUpload::make('distributivo')
             ->label('Distributivo (PDF, Word o Excel; puede adjuntar varios)')
             ->disk(ServicioDocumento::DISCO)
@@ -332,7 +361,22 @@ class ViewProceso extends ViewRecord
                 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
             ])
             ->multiple()
-            ->storeFileNamesIn('nombre_distributivo');
+            ->storeFileNamesIn('nombre_distributivo')
+            ->required($distributivoPendiente);
+
+        // Fichas tecnicas, certificados, etc. (varios archivos por tipo); solo los que aun no se han cargado
+        foreach ($adicionales->where('codigo', '!=', ServicioLegalizacion::TIPO_DISTRIBUTIVO) as $tipo) {
+            $campos[] = FileUpload::make("adicional_{$tipo->id}")
+                ->label($tipo->nombre.' (PDF, puede adjuntar varios)')
+                ->disk(ServicioDocumento::DISCO)
+                ->directory('temporal')
+                ->visibility('private')
+                ->acceptedFileTypes(['application/pdf'])
+                ->multiple()
+                ->storeFileNamesIn("nombre_adicional_{$tipo->id}")
+                ->required();
+        }
+        $campos[] = $pdf('memorando', 'Memorando de solicitud de publicación (PDF)');
         $campos[] = TextInput::make('numero_memorando')
             ->label('Número del memorando')
             ->helperText('Ingresar como consta en el Memorando')
@@ -340,7 +384,7 @@ class ViewProceso extends ViewRecord
             ->required();
         $campos[] = Select::make('numero_publicaciones')
             ->label('Número de publicaciones solicitadas')
-            ->helperText('Cada publicación puede durar un tiempo distinto. Se indica en horas: 24 horas = 1 día, 48 horas = 2 días')
+            ->helperText('Cada publicación puede durar un tiempo distinto. Se indica en horas, en múltiplos de 24: 24 horas = 1 día, 48 horas = 2 días')
             ->options(array_combine(range(1, ServicioLegalizacion::MAX_PUBLICACIONES), range(1, ServicioLegalizacion::MAX_PUBLICACIONES)))
             ->default(1)
             ->live()
@@ -349,7 +393,12 @@ class ViewProceso extends ViewRecord
             $campos[] = TextInput::make("horas_{$n}")
                 ->label("Publicación {$n}: duración")
                 ->numeric()->integer()
-                ->minValue(1)->maxValue(ServicioLegalizacion::MAX_HORAS)
+                ->minValue(24)->maxValue(ServicioLegalizacion::MAX_HORAS)->step(24)
+                ->rule(fn () => function (string $atributo, $valor, \Closure $fallar) {
+                    if ($valor !== null && $valor !== '' && (int) $valor % 24 !== 0) {
+                        $fallar('Las horas deben ser 24 o un múltiplo de 24.');
+                    }
+                })
                 ->suffix('horas')
                 ->visible(fn (Get $get) => (int) $get('numero_publicaciones') >= $n)
                 ->required(fn (Get $get) => (int) $get('numero_publicaciones') >= $n);
@@ -406,25 +455,75 @@ class ViewProceso extends ViewRecord
             ->required();
     }
 
-    /** La unidad requirente remite a Compras el Estudio de Mercado y la Certificacion POA (PDF legalizados). */
-    private function accionRemitirDocumentacion(Proceso $proceso, User $usuario): Action
+    /** El analista remite las ofertas a la unidad: Necesidad de Contratacion Finalizada y los dos memorandos de la comision (PDF). */
+    private function accionRemitirOfertas(Proceso $proceso, User $usuario): Action
     {
-        return Action::make('transicion_remitir_documentacion')
-            ->label('Remitir documentación')
+        return Action::make('transicion_remitir_ofertas')
+            ->label('Remitir ofertas')
             ->icon('heroicon-o-paper-airplane')
-            ->modalHeading('Remitir Estudio de Mercado y Certificación POA')
-            ->modalDescription('Cargue un único PDF legalizado por cada documento. Al confirmar, pasan a Compras para la comisión técnica.')
-            ->modalSubmitActionLabel('Remitir')
+            ->modalHeading('Remitir ofertas')
+            ->modalDescription('Cargue los tres PDF obligatorios. Al confirmar, el proceso pasa a la Comisión Técnica y se crea su usuario de acceso.')
+            ->modalSubmitActionLabel('Remitir ofertas')
             ->schema([
-                $this->campoPdf('estudio', 'Estudio de Mercado (PDF legalizado)'),
-                $this->campoPdf('poa', 'Certificación POA (PDF legalizado)'),
+                $this->campoPdf('necesidad', 'Necesidad de Contratación Finalizada (PDF)'),
+                $this->campoPdf('memo_solicitud', 'Memorando de Solicitud de la Designación de la Comisión (PDF)'),
+                $this->campoPdf('memo_designacion', 'Memorando de Designación de la Comisión (PDF)'),
             ])
             ->action(function (array $data) use ($proceso, $usuario) {
                 $archivo = fn (string $campo): array => [$this->rutaSubida($data[$campo]), $this->rutaSubida($data['nombre_'.$campo] ?? $data[$campo])];
 
-                $this->ejecutar(fn () => app(ServicioRemisionDocumentacion::class)->remitir(
-                    $proceso, $usuario, $archivo('estudio'), $archivo('poa')
-                ), 'Documentación remitida a Compras');
+                $this->ejecutar(function () use ($proceso, $usuario, $archivo) {
+                    $c = app(ServicioRemisionOfertas::class)->remitir(
+                        $proceso, $usuario, $archivo('necesidad'), $archivo('memo_solicitud'), $archivo('memo_designacion')
+                    );
+                    // Credenciales iniciales de la comision (la clave es igual al usuario)
+                    Notification::make()
+                        ->title('Usuario de la Comisión Técnica creado')
+                        ->body("Usuario: {$c['usuario']} — Clave inicial: {$c['clave']}. Entréguelas a la comisión.")
+                        ->success()->persistent()->send();
+                }, 'Ofertas remitidas a la Comisión Técnica');
+            });
+    }
+
+    /** La Comision Tecnica remite su informe: devolucion de expediente o seleccion de proveedor (un PDF por documento). */
+    private function accionRemitirInforme(Proceso $proceso, User $usuario): Action
+    {
+        $esSeleccion = fn (Get $get): bool => $get('tipo_informe') === ServicioInformeComision::SELECCION;
+        $hayTipo = fn (Get $get): bool => in_array($get('tipo_informe'), [ServicioInformeComision::DEVOLUCION, ServicioInformeComision::SELECCION], true);
+
+        return Action::make('remitir_informe')
+            ->label('Remitir Informe')
+            ->icon('heroicon-o-paper-airplane')
+            ->modalHeading('Remitir Informe')
+            ->modalDescription('Seleccione el tipo de informe y cargue un PDF por cada documento.')
+            ->modalSubmitActionLabel('Remitir Informe')
+            ->schema([
+                Select::make('tipo_informe')
+                    ->label('Tipo de Documento')
+                    ->options([
+                        ServicioInformeComision::DEVOLUCION => 'Informe de Recomendación de Devolución de Expediente',
+                        ServicioInformeComision::SELECCION => 'Informe de Recomendación de Selección de Proveedor',
+                    ])
+                    ->live()
+                    ->required(),
+                $this->campoPdf('memorando', 'Memorando de remisión de informe (PDF)')->visible($hayTipo),
+                $this->campoPdf('informe_devolucion', 'Informe de Recomendación de Devolución de Expediente (PDF)')
+                    ->visible(fn (Get $get) => $get('tipo_informe') === ServicioInformeComision::DEVOLUCION),
+                $this->campoPdf('informe_seleccion', 'Informe de Recomendación de Selección de Proveedor (PDF)')->visible($esSeleccion),
+                $this->campoPdf('acta', 'Acta de Constancia de Recepción de Ofertas (PDF)')->visible($esSeleccion),
+                $this->campoPdf('firmas', 'Validación de firmas (PDF)')->visible($esSeleccion),
+            ])
+            ->action(function (array $data) use ($proceso, $usuario) {
+                $archivo = fn (string $campo): array => [$this->rutaSubida($data[$campo] ?? null), $this->rutaSubida($data['nombre_'.$campo] ?? ($data[$campo] ?? null))];
+                $tipo = $data['tipo_informe'];
+                $archivos = ['memorando' => $archivo('memorando')];
+                if ($tipo === ServicioInformeComision::DEVOLUCION) {
+                    $archivos['informe'] = $archivo('informe_devolucion');
+                } else {
+                    $archivos += ['informe' => $archivo('informe_seleccion'), 'acta' => $archivo('acta'), 'firmas' => $archivo('firmas')];
+                }
+
+                $this->ejecutar(fn () => app(ServicioInformeComision::class)->remitir($proceso, $usuario, $tipo, $archivos), 'Informe remitido');
             });
     }
 
@@ -449,6 +548,24 @@ class ViewProceso extends ViewRecord
                     $proceso, $usuario, $archivo('memorando'), $archivo('informe')
                 ), 'Expediente devuelto: el proceso queda en Para Re-publicar');
             });
+    }
+
+    /**
+     * Une cada ruta temporal con su nombre original: por la ruta, por el orden o, si no hay nombre, el de la ruta.
+     *
+     * @return array<int, array{0: string, 1: string}>
+     */
+    private function archivosConNombre(array $rutas, array $nombres): array
+    {
+        $porOrden = array_values($nombres);
+        $resultado = [];
+        foreach (array_values($rutas) as $i => $valor) {
+            $ruta = $this->rutaSubida($valor);
+            $nombre = $nombres[$ruta] ?? $nombres[$valor] ?? $porOrden[$i] ?? basename($ruta);
+            $resultado[] = [$ruta, is_array($nombre) ? (string) array_values($nombre)[0] : (string) $nombre];
+        }
+
+        return $resultado;
     }
 
     private function rutaSubida(mixed $valor): string

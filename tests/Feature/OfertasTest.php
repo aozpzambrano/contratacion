@@ -13,11 +13,12 @@ use App\Services\ServicioDocumentoFijo;
 use App\Services\ServicioLegalizacion;
 use App\Services\ServicioOferta;
 use App\Services\ServicioProceso;
-use App\Services\ServicioRemisionDocumentacion;
+use App\Services\ServicioInformeComision;
 use App\Services\ServicioPublicacion;
 use DomainException;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Hash;
 use Illuminate\Support\Facades\Storage;
 use Livewire\Livewire;
 use Tests\Feature\Concerns\CreaProcesos;
@@ -79,14 +80,25 @@ class OfertasTest extends TestCase
         app(ServicioPublicacion::class)->registrar($this->proceso->fresh(), $this->analista, $necesidad, 'https://sitio.ec/p', '2026-12-01 08:00', '2026-12-05 17:00');
     }
 
-    private function oferta(string $id, string $razon, float $p1, float $p2): array
+    private function oferta(string $id, string $razon, float $p1, float $p2, ?array $archivos = null): array
     {
-        return ['identificacion' => $id, 'razon_social' => $razon, 'precios' => [$this->items[1] => $p1, $this->items[2] => $p2]];
+        return [
+            'identificacion' => $id, 'razon_social' => $razon, 'precios' => [$this->items[1] => $p1, $this->items[2] => $p2],
+            'archivos' => $archivos ?? [$this->pdfTemporal("oferta_{$id}.pdf")],
+        ];
     }
 
     private function registrar(array $ofertas, ?User $usuario = null): void
     {
         $this->ofertas->registrar($this->proceso->fresh(), $usuario ?? $this->analista, $ofertas);
+    }
+
+    /** El analista remite las ofertas con los tres PDF obligatorios (Necesidad finalizada y los dos memorandos de la comision). */
+    private function remitirOfertas(): array
+    {
+        return app(\App\Services\ServicioRemisionOfertas::class)->remitir(
+            $this->proceso->fresh(), $this->analista, $this->pdfTemporal('necesidad_finalizada.pdf'), $this->pdfTemporal('memo_solicitud.pdf'), $this->pdfTemporal('memo_designacion.pdf')
+        );
     }
 
     private function tres(): array
@@ -208,6 +220,7 @@ class OfertasTest extends TestCase
     public function test_la_pantalla_muestra_ofertas_y_republicar_segun_corresponda(): void
     {
         $this->actingAs($this->analista);
+        $archivo = $this->pdfTemporal('x.pdf');
 
         Livewire::test(ViewProceso::class, ['record' => $this->proceso->getRouteKey()])
             ->assertActionVisible('ofertas')
@@ -223,12 +236,18 @@ class OfertasTest extends TestCase
                         ['item_id' => $this->items[1], 'linea' => 1, 'descripcion' => 'Paracetamol 500 mg', 'cantidad' => 10, 'precio' => '1.5'],
                         ['item_id' => $this->items[2], 'linea' => 2, 'descripcion' => 'Ibuprofeno 400 mg', 'cantidad' => 4, 'precio' => '2.25'],
                     ],
+                    'archivos' => [$archivo[0]],
+                    'nombres_archivos' => [$archivo[0] => 'oferta farma uno.pdf'],
                 ]],
             ])
             ->assertHasNoActionErrors();
 
+        // si la accion fallo, el mensaje del error aparece aqui
+        $errores = collect(session('filament.notifications', []))->where('status', 'danger')->pluck('body')->all();
+        $this->assertSame([], $errores, 'la accion no debio fallar');
         $this->assertSame(1, $this->ofertas->cantidad($this->proceso->fresh()));
         $this->assertSame(24.0, $this->ofertas->resumen($this->proceso->fresh())->first()['total']);
+        $this->assertSame('oferta farma uno.pdf', $this->ofertas->resumen($this->proceso->fresh())->first()['archivos'][0]['nombre']);
 
         // con 1 oferta (< 3) y 1 de 2 publicaciones: se habilita Publicar y no Remitir ofertas
         Livewire::test(ViewProceso::class, ['record' => $this->proceso->getRouteKey()])
@@ -296,38 +315,123 @@ class OfertasTest extends TestCase
         $this->assertNull($this->ofertas->decision($this->proceso->fresh()), 'la nueva publicacion aun no tiene ofertas registradas');
     }
 
-    public function test_remitir_ofertas_devuelve_a_la_unidad_y_esta_remite_estudio_de_mercado_y_poa_a_compras(): void
+    public function test_remitir_ofertas_crea_el_usuario_de_la_comision_tecnica_y_pasa_el_proceso_a_comision(): void
     {
         $this->registrar($this->tres());
-        $this->procesos->aplicarTransicion($this->proceso->fresh(), TransicionProceso::where('codigo', 'remitir_ofertas')->firstOrFail(), $this->analista);
+        $c = $this->remitirOfertas();
 
         $proceso = $this->proceso->fresh();
-        $this->assertSame('PARA_DOCUMENTACION', $proceso->estadoProceso->codigo);
-        $this->assertSame('PREPARATORIA', $proceso->estadoMacro->codigo, 'la fase Precontractual empieza con la comision tecnica');
+        $this->assertSame('EN_COMISION', $proceso->estadoProceso->codigo);
+        $this->assertSame('PRECONTRACTUAL', $proceso->estadoMacro->codigo, 'la fase Precontractual empieza con la comision tecnica');
 
-        $remision = app(ServicioRemisionDocumentacion::class);
-        $this->assertTrue($remision->puedeRemitir($proceso, $this->unidad));
-        $this->assertFalse($remision->puedeRemitir($proceso, $this->analista));
+        // usuario propio del proceso, con rol Comision Tecnica y clave temporal que solo se guarda cifrada
+        $comision = User::where('email', $c['usuario'])->firstOrFail();
+        $this->assertTrue($comision->activo);
+        $this->assertTrue($comision->tieneRol('COMISION_TECNICA'));
+        $this->assertStringContainsString($proceso->codigo, $comision->name);
+        $partes = explode('-', $proceso->codigo);
+        $local = 'comision.'.$partes[count($partes) - 2].'.'.last($partes);
+        $this->assertSame("{$local}@ailep.com", $c['usuario']);
+        $this->assertSame($local, $c['clave'], 'la clave inicial es el mismo usuario');
+        $this->assertTrue($comision->debe_cambiar_clave, 'debe cambiar la clave en el primer ingreso');
+        $this->assertTrue(Hash::check($c['clave'], $comision->password));
+        $this->assertNotSame($c['clave'], $comision->getRawOriginal('password'));
+        $this->assertTrue($this->procesos->estaAsignado($proceso, $comision));
 
-        // falta un archivo: no cambia nada
+        // ve el proceso, remite informes y exporta el expediente; Compras y la unidad no remiten informes
+        $informes = app(ServicioInformeComision::class);
+        $this->assertTrue($informes->puedeRemitir($proceso, $comision));
+        $this->assertFalse($informes->puedeRemitir($proceso, $this->analista));
+        $this->assertFalse($informes->puedeRemitir($proceso, $this->unidad));
+        $this->assertTrue(app(\App\Services\ServicioExpedientePublicacion::class)->puedeGenerar($proceso, $comision));
+
+        $this->actingAs($comision);
+        Livewire::test(ViewProceso::class, ['record' => $this->proceso->getRouteKey()])
+            ->assertActionVisible('remitir_informe')
+            ->assertSee('Ofertas')
+            ->assertDontSee('Solicitud de publicación');
+
+        $this->actingAs($this->analista);
+        Livewire::test(ViewProceso::class, ['record' => $this->proceso->getRouteKey()])
+            ->assertActionDoesNotExist('remitir_informe')
+            ->assertActionDoesNotExist('transicion_remitir_documentacion');
+    }
+
+    /** @return array{0: Proceso, 1: User} proceso en comision y el usuario de la comision */
+    private function procesoEnComision(): array
+    {
+        $this->registrar($this->tres());
+        $c = $this->remitirOfertas();
+
+        return [$this->proceso->fresh(), User::where('email', $c['usuario'])->firstOrFail()];
+    }
+
+    public function test_informe_de_devolucion_de_la_comision_pide_dos_pdf_y_deja_el_proceso_para_reapertura(): void
+    {
+        [$proceso, $comision] = $this->procesoEnComision();
+        $informes = app(ServicioInformeComision::class);
+        $tipos = TipoDocumento::whereIn('codigo', ['MEMORANDO_REMISION_INFORME', 'INFORME_RECOMENDACION_DEVOLUCION'])->pluck('id');
+        $this->assertCount(2, $tipos);
+
+        // falta el informe: no cambia nada y no quedan temporales
         try {
-            $remision->remitir($proceso, $this->unidad, $this->pdfTemporal('estudio.pdf'), []);
-            $this->fail('Debio exigir la Certificacion POA');
+            $informes->remitir($proceso, $comision, ServicioInformeComision::DEVOLUCION, ['memorando' => $this->pdfTemporal('memo.pdf'), 'informe' => []]);
+            $this->fail('Debio exigir el informe');
         } catch (DomainException $e) {
-            $this->assertStringContainsString('Certificación POA', $e->getMessage());
+            $this->assertStringContainsString('Informe de Recomendación de Devolución de Expediente', $e->getMessage());
         }
-        $this->assertSame('PARA_DOCUMENTACION', $this->proceso->fresh()->estadoProceso->codigo);
-        $this->assertSame(0, DB::table('documentos')->whereIn('tipo_documento_id', TipoDocumento::whereIn('codigo', ['ESTUDIO_MERCADO', 'CERTIFICACION_POA'])->pluck('id'))->count());
+        $this->assertSame('EN_COMISION', $this->proceso->fresh()->estadoProceso->codigo);
+        $this->assertSame(0, DB::table('documentos')->whereIn('tipo_documento_id', $tipos)->count());
+        $this->assertSame([], Storage::disk(ServicioDocumento::DISCO)->allFiles('temporal'));
 
-        $remision->remitir($proceso, $this->unidad, $this->pdfTemporal('estudio.pdf'), $this->pdfTemporal('poa.pdf'));
+        $informes->remitir($proceso, $comision, ServicioInformeComision::DEVOLUCION, [
+            'memorando' => $this->pdfTemporal('memo.pdf'), 'informe' => $this->pdfTemporal('informe.pdf'),
+        ]);
 
-        $proceso = $this->proceso->fresh();
-        $this->assertSame('PARA_COMISION', $proceso->estadoProceso->codigo);
+        $this->assertSame('PARA_REAPERTURA', $this->proceso->fresh()->estadoProceso->codigo);
         $estados = DB::table('documentos as d')->join('estados_documento as e', 'e.id', '=', 'd.estado_documento_id')
-            ->join('tipos_documento as t', 't.id', '=', 'd.tipo_documento_id')
-            ->whereIn('t.codigo', ['ESTUDIO_MERCADO', 'CERTIFICACION_POA'])->where('d.proceso_id', $proceso->id)->pluck('e.codigo');
+            ->whereIn('d.tipo_documento_id', $tipos)->where('d.proceso_id', $proceso->id)->pluck('e.codigo');
         $this->assertCount(2, $estados);
         $this->assertSame(['LEGALIZADO'], $estados->unique()->values()->all());
+        $this->assertSame(1, DB::table('devoluciones')->where('proceso_id', $proceso->id)->count());
+        // la comision sigue activa pero en solo lectura: ve el proceso y ya no remite ni carga documentos
+        $proceso = $proceso->fresh();
+        $this->assertTrue($comision->fresh()->activo);
+        $this->assertTrue($this->procesos->estaAsignado($proceso, $comision));
+        $this->assertTrue(app(\App\Services\ServicioDocumento::class)->puedeVerProceso($proceso, $comision->fresh()));
+        $this->assertFalse($informes->puedeRemitir($proceso, $comision->fresh()));
+        $this->assertFalse(app(\App\Services\ServicioDocumento::class)->puedeSubir($proceso, $comision->fresh()));
+        $this->assertTrue(app(\App\Services\ServicioDocumento::class)->tiposDisponibles($proceso, $comision->fresh())->isEmpty());
+    }
+
+    public function test_informe_de_seleccion_de_proveedor_pide_los_cuatro_pdf(): void
+    {
+        [$proceso, $comision] = $this->procesoEnComision();
+        $informes = app(ServicioInformeComision::class);
+        // cada archivo se crea solo si no es el que falta (un temporal descartado por el test quedaria huerfano)
+        $completo = fn (?string $falta = null) => collect(['memorando', 'informe', 'acta', 'firmas'])
+            ->mapWithKeys(fn ($c) => [$c => $c === $falta ? [] : $this->pdfTemporal($c.'.pdf')])->all();
+
+        foreach (['memorando', 'informe', 'acta', 'firmas'] as $falta) {
+            $archivos = $completo($falta);
+            try {
+                $informes->remitir($proceso, $comision, ServicioInformeComision::SELECCION, $archivos);
+                $this->fail("Debio exigir: {$falta}");
+            } catch (DomainException $e) {
+                $this->assertStringContainsString('Cargue el documento', $e->getMessage(), $falta);
+            }
+            $this->assertSame('EN_COMISION', $this->proceso->fresh()->estadoProceso->codigo, $falta);
+            $this->assertSame([], Storage::disk(ServicioDocumento::DISCO)->allFiles('temporal'), "sin temporales ({$falta})");
+        }
+
+        $informes->remitir($proceso, $comision, ServicioInformeComision::SELECCION, $completo());
+
+        $this->assertSame('APROBADO', $this->proceso->fresh()->estadoProceso->codigo);
+        $this->assertSame(4, DB::table('documentos as d')->join('estados_documento as e', 'e.id', '=', 'd.estado_documento_id')
+            ->join('tipos_documento as t', 't.id', '=', 'd.tipo_documento_id')
+            ->whereIn('t.codigo', ['MEMORANDO_REMISION_INFORME', 'INFORME_SELECCION_PROVEEDOR', 'ACTA_RECEPCION_OFERTAS', 'VALIDACION_FIRMAS_INFORME'])
+            ->where('d.proceso_id', $proceso->id)->where('e.codigo', 'LEGALIZADO')->count());
+        $this->assertSame(0, DB::table('devoluciones')->where('proceso_id', $proceso->id)->count());
     }
 
     public function test_sin_ofertas_y_publicaciones_agotadas_el_analista_devuelve_y_la_unidad_re_publica_en_un_ciclo_nuevo(): void
@@ -361,7 +465,7 @@ class OfertasTest extends TestCase
         // la unidad vuelve a pedir memorando, horas y numero de publicaciones; los documentos legalizados se conservan
         $this->assertSame(0, app(ServicioDocumento::class)->documentosPorLegalizar($proceso)->count());
         $this->assertTrue(app(ServicioLegalizacion::class)->puedeRemitir($proceso, $this->unidad));
-        $this->remitirLegalizados($proceso, $this->unidad, [12], 'AIL-GER-2026-002-M');
+        $this->remitirLegalizados($proceso, $this->unidad, [24], 'AIL-GER-2026-002-M');
 
         $proceso = $this->proceso->fresh();
         $this->assertSame('LEGALIZADO', $proceso->estadoProceso->codigo);
@@ -424,18 +528,111 @@ class OfertasTest extends TestCase
         $ver()->assertActionDoesNotExist('devolver_sin_ofertas');
     }
 
-    public function test_la_unidad_ve_remitir_documentacion_y_compras_no(): void
+    public function test_remitir_ofertas_exige_necesidad_finalizada_y_los_dos_memorandos(): void
     {
         $this->registrar($this->tres());
-        $this->procesos->aplicarTransicion($this->proceso->fresh(), TransicionProceso::where('codigo', 'remitir_ofertas')->firstOrFail(), $this->analista);
+        $remision = app(\App\Services\ServicioRemisionOfertas::class);
+        $tipos = TipoDocumento::whereIn('codigo', ['NECESIDAD_CONTRATACION_FINALIZADA', 'MEMORANDO_SOLICITUD_DESIGNACION_COMISION', 'MEMORANDO_DESIGNACION_COMISION'])->pluck('id');
+        $this->assertCount(3, $tipos);
 
-        $this->actingAs($this->unidad);
+        // solo el analista asignado puede remitir
+        $this->assertTrue($remision->puedeRemitir($this->proceso->fresh(), $this->analista));
+        $this->assertFalse($remision->puedeRemitir($this->proceso->fresh(), $this->unidad));
+
+        // cada caso crea su temporal justo antes de ejecutarse
+        $casos = [
+            'sin memorando de designacion' => [fn () => [$this->pdfTemporal('necesidad.pdf'), $this->pdfTemporal('solicitud.pdf'), []], 'Memorando de Designación de la Comisión'],
+            'sin memorando de solicitud' => [fn () => [$this->pdfTemporal('necesidad.pdf'), [], $this->pdfTemporal('designacion.pdf')], 'Memorando de Solicitud'],
+            'sin necesidad' => [fn () => [[], $this->pdfTemporal('solicitud.pdf'), $this->pdfTemporal('designacion.pdf')], 'Necesidad de Contratación Finalizada'],
+        ];
+        foreach ($casos as $caso => [$crear, $mensaje]) {
+            [$necesidad, $solicitud, $designacion] = $crear();
+            try {
+                $remision->remitir($this->proceso->fresh(), $this->analista, $necesidad, $solicitud, $designacion);
+                $this->fail("Debio exigir el documento: {$caso}");
+            } catch (DomainException $e) {
+                $this->assertStringContainsString($mensaje, $e->getMessage(), $caso);
+            }
+            $this->assertSame('PUBLICADO', $this->proceso->fresh()->estadoProceso->codigo, $caso);
+            $this->assertSame(0, DB::table('documentos')->whereIn('tipo_documento_id', $tipos)->count(), $caso);
+            $this->assertSame([], Storage::disk(ServicioDocumento::DISCO)->allFiles('temporal'), "sin temporales ({$caso})");
+        }
+
+        $this->remitirOfertas();
+        $this->assertSame('EN_COMISION', $this->proceso->fresh()->estadoProceso->codigo);
+        $estados = DB::table('documentos as d')->join('estados_documento as e', 'e.id', '=', 'd.estado_documento_id')
+            ->whereIn('d.tipo_documento_id', $tipos)->where('d.proceso_id', $this->proceso->id)->pluck('e.codigo');
+        $this->assertCount(3, $estados);
+        $this->assertTrue($estados->every(fn ($e) => $e === 'LEGALIZADO'));
+    }
+
+    public function test_el_boton_remitir_ofertas_pide_los_tres_pdf_desde_la_pantalla(): void
+    {
+        $this->registrar($this->tres());
+        $this->actingAs($this->analista);
+
         Livewire::test(ViewProceso::class, ['record' => $this->proceso->getRouteKey()])
-            ->assertActionVisible('transicion_remitir_documentacion');
+            ->assertActionVisible('transicion_remitir_ofertas')
+            ->callAction('transicion_remitir_ofertas', ['necesidad' => null, 'memo_solicitud' => null, 'memo_designacion' => null])
+            ->assertHasActionErrors(['necesidad' => 'required', 'memo_solicitud' => 'required', 'memo_designacion' => 'required']);
+        $this->assertSame('PUBLICADO', $this->proceso->fresh()->estadoProceso->codigo);
+
+        $necesidad = $this->pdfTemporal('necesidad.pdf');
+        $solicitud = $this->pdfTemporal('solicitud.pdf');
+        $designacion = $this->pdfTemporal('designacion.pdf');
+        Livewire::test(ViewProceso::class, ['record' => $this->proceso->getRouteKey()])
+            ->callAction('transicion_remitir_ofertas', [
+                'necesidad' => [$necesidad[0]], 'nombre_necesidad' => $necesidad[1],
+                'memo_solicitud' => [$solicitud[0]], 'nombre_memo_solicitud' => $solicitud[1],
+                'memo_designacion' => [$designacion[0]], 'nombre_memo_designacion' => $designacion[1],
+            ])
+            ->assertHasNoActionErrors();
+
+        $errores = collect(session('filament.notifications', []))->where('status', 'danger')->pluck('body')->all();
+        $this->assertSame([], $errores, 'la accion no debio fallar');
+        $this->assertSame('EN_COMISION', $this->proceso->fresh()->estadoProceso->codigo);
+    }
+
+    public function test_la_seccion_ofertas_muestra_la_publicacion_aunque_no_tenga_ofertas(): void
+    {
+        $this->actingAs($this->analista);
+        $ver = fn () => Livewire::test(ViewProceso::class, ['record' => $this->proceso->getRouteKey()]);
+
+        // aun no se registran las ofertas de la publicacion: no hay leyenda
+        $ver()->assertDontSee('Publicación N.° 1 — 0 ofertas');
+
+        $this->registrar([]);
+        $ver()->assertSee('Ofertas')->assertSee('Publicación N.° 1 — 0 ofertas');
+
+        // una segunda publicacion con una oferta: cada grupo con su conteo
+        $this->publicar('NC-2026-002');
+        $this->registrar([$this->oferta('1790000000001', 'Proveedor A', 1, 1)]);
+        $ver()->assertSeeInOrder(['Publicación N.° 1 — 0 ofertas', 'Publicación N.° 2 — 1 oferta', 'Proveedor A']);
+    }
+
+    public function test_aviso_de_designacion_segun_el_mayor_monto_total(): void
+    {
+        $this->registrar($this->tres());
+        $remision = app(\App\Services\ServicioRemisionOfertas::class);
+        $proceso = $this->proceso->fresh();
+
+        $this->assertTrue($remision->puedeVerAviso($proceso, $this->analista));
+        $this->assertFalse($remision->puedeVerAviso($proceso, $this->unidad));
+        $d = $remision->designacionSugerida($proceso);
+        $this->assertSame('DELEGADO', $d['codigo'], 'montos bajos: Servidor Afin');
+
+        $umbrales = [99999.99 => 'DELEGADO', 100000 => 'COMISION', 499999.99 => 'COMISION', 500000.01 => 'COMISION_FINANCIERO_JURIDICO'];
+        foreach ($umbrales as $monto => $esperado) {
+            $this->assertSame($esperado, DB::selectOne('select td.codigo from tipos_designacion td where td.id = tipo_designacion_sugerido(?)', [$monto])->codigo, (string) $monto);
+        }
 
         $this->actingAs($this->analista);
         Livewire::test(ViewProceso::class, ['record' => $this->proceso->getRouteKey()])
-            ->assertActionDoesNotExist('transicion_remitir_documentacion');
+            ->assertSee('Designación sugerida')
+            ->assertSee('Servidor Afín');
+        $this->actingAs($this->unidad);
+        Livewire::test(ViewProceso::class, ['record' => $this->proceso->getRouteKey()])
+            ->assertDontSee('Designación sugerida');
     }
 
     public function test_los_documentos_fijos_no_se_muestran_mientras_el_proceso_esta_en_la_unidad(): void
@@ -445,11 +642,111 @@ class OfertasTest extends TestCase
 
         // el estado solo cambia por transicion: se habilita el cambio directo unicamente para esta comprobacion
         DB::select("select set_config('app.transicion_en_curso', 'procesos', false)");
-        foreach (['PARA_REPUBLICAR' => false, 'PARA_LEGALIZAR' => false, 'PARA_DOCUMENTACION' => true, 'LEGALIZADO' => true] as $estado => $visible) {
+        foreach (['PARA_REPUBLICAR' => false, 'PARA_LEGALIZAR' => false, 'EN_COMISION' => true, 'LEGALIZADO' => true] as $estado => $visible) {
             DB::table('procesos')->where('id', $this->proceso->id)
                 ->update(['estado_proceso_id' => DB::table('estados_proceso')->where('codigo', $estado)->value('id')]);
             $this->assertSame($visible, $fijos->estadoPermiteVer($this->proceso->fresh()), $estado);
         }
         DB::select("select set_config('app.transicion_en_curso', '', false)");
+    }
+
+    // ---- archivos de la oferta y valor unitario en la ficha ----
+
+    public function test_cada_oferta_exige_sus_archivos_y_no_deja_nada_a_medias(): void
+    {
+        // cada caso crea sus propios temporales justo antes de ejecutarse
+        $casos = [
+            'sin archivos' => [fn () => $this->oferta('1790000000001', 'A', 1, 1, []), 'cargue los archivos de la oferta'],
+            'formato' => [fn () => $this->oferta('1790000000002', 'B', 1, 1, [$this->pdfTemporal('programa.exe', 'MZ')]), 'no es de un tipo permitido'],
+            'vacio' => [fn () => $this->oferta('1790000000003', 'C', 1, 1, [$this->pdfTemporal('vacio.pdf', '')]), 'está vacío'],
+        ];
+
+        foreach ($casos as $caso => [$crear, $mensaje]) {
+            $oferta = $crear();
+            // la primera oferta es valida: debe revertirse junto con la rota
+            $buena = $this->oferta('1790000000009', 'Buena', 1, 1);
+            try {
+                $this->registrar([$buena, $oferta]);
+                $this->fail("Debio rechazar: {$caso}");
+            } catch (DomainException $e) {
+                $this->assertStringContainsString($mensaje, $e->getMessage(), $caso);
+            }
+            $this->assertSame(0, DB::table('ofertas')->count(), $caso);
+            $this->assertSame(0, DB::table('oferta_archivos')->count(), $caso);
+            $this->assertSame([], Storage::disk(ServicioDocumento::DISCO)->allFiles('temporal'), "no quedan temporales ({$caso})");
+            $this->assertSame([], Storage::disk(ServicioDocumento::DISCO)->allFiles("procesos/{$this->proceso->id}/ofertas"), "no quedan archivos huerfanos ({$caso})");
+        }
+    }
+
+    public function test_una_oferta_guarda_varios_archivos_con_su_nombre_original(): void
+    {
+        $oferta = $this->oferta('1790000000001', 'Farma Uno S.A.', 1.5, 2.25, [
+            $this->pdfTemporal('Propuesta economica.pdf'),
+            $this->pdfTemporal('Anexos.xlsx', 'excel'),
+            $this->pdfTemporal('Carpeta completa.zip', 'PK'),
+        ]);
+        $this->registrar([$oferta]);
+
+        $resumen = $this->ofertas->resumen($this->proceso->fresh())->first();
+        $this->assertSame(['Propuesta economica.pdf', 'Anexos.xlsx', 'Carpeta completa.zip'], array_column($resumen['archivos'], 'nombre'));
+        $archivo = \App\Models\Archivo::findOrFail($resumen['archivos'][0]['id']);
+        $this->assertStringStartsWith("procesos/{$this->proceso->id}/ofertas/{$resumen['id']}/", $archivo->ruta);
+        Storage::disk(ServicioDocumento::DISCO)->assertExists($archivo->ruta);
+        $this->assertSame([], Storage::disk(ServicioDocumento::DISCO)->allFiles('temporal'), 'los temporales se movieron');
+    }
+
+    public function test_la_ficha_muestra_el_valor_unitario_antes_del_total_del_item(): void
+    {
+        $this->registrar([$this->oferta('1790000000001', 'Farma Uno S.A.', 1.5, 2.25)]);
+
+        $this->actingAs($this->analista);
+        Livewire::test(ViewProceso::class, ['record' => $this->proceso->getRouteKey()])
+            ->assertSeeInOrder(['Publicación N.° 1', 'RUC / Cédula', 'Razón Social', 'Detalle por ítem', 'Ítem', 'Cantidad', 'Valor unitario', 'Total del ítem'])
+            ->assertSeeInOrder(['$ 1.5000', '$ 15.00', '$ 2.2500', '$ 9.00', 'Total del proceso', '$ 24.00', 'Oferta del proveedor', 'Descargar oferta (ZIP)'])
+            ->assertDontSee('oferta_1790000000001.pdf');
+    }
+
+    public function test_la_ficha_agrupa_las_ofertas_por_numero_de_publicacion(): void
+    {
+        $this->registrar([$this->oferta('1790000000001', 'Proveedor A', 1, 1)]);
+        $this->publicar('NC-2026-002');
+        $this->registrar([$this->oferta('1790000000002', 'Proveedor B', 1, 1), $this->oferta('1790000000003', 'Proveedor C', 1, 1)]);
+
+        $this->actingAs($this->analista);
+        Livewire::test(ViewProceso::class, ['record' => $this->proceso->getRouteKey()])
+            ->assertSeeInOrder(['Publicación N.° 1 — 1 oferta', 'Proveedor A', 'Publicación N.° 2 — 2 ofertas', 'Proveedor B', 'Proveedor C']);
+    }
+
+    public function test_la_oferta_se_descarga_completa_en_un_zip(): void
+    {
+        $oferta = $this->oferta('1790000000001', 'Farma Uno S.A.', 1.5, 2.25);
+        $oferta['archivos'] = [$this->pdfTemporal('Propuesta.pdf'), $this->pdfTemporal('Propuesta.pdf'), $this->pdfTemporal('Anexos.xlsx', 'excel')];
+        $this->registrar([$oferta]);
+        $id = $this->ofertas->resumen($this->proceso->fresh())->first()['id'];
+        $url = route('ofertas.descargar_zip', $id);
+
+        $this->get($url)->assertRedirect();
+        $this->actingAs(User::factory()->conRoles('UNIDAD_REQUIRENTE')->create())->get($url)->assertForbidden();
+
+        $respuesta = $this->actingAs($this->analista)->get($url);
+        $respuesta->assertOk();
+        $this->assertStringContainsString('oferta_1790000000001_farma_uno_sa.zip', $respuesta->headers->get('content-disposition'));
+
+        $ruta = tempnam(sys_get_temp_dir(), 'tz');
+        file_put_contents($ruta, $respuesta->streamedContent());
+        $zip = new \ZipArchive;
+        $this->assertTrue($zip->open($ruta) === true);
+        $nombres = [];
+        for ($i = 0; $i < $zip->numFiles; $i++) {
+            $nombres[] = $zip->getNameIndex($i);
+        }
+        $zip->close();
+        @unlink($ruta);
+        sort($nombres);
+        $this->assertSame(['Anexos.xlsx', 'Propuesta.pdf', 'Propuesta_2.pdf'], $nombres);
+        $this->assertDatabaseHas('auditoria', ['evento' => 'oferta.zip_descargado', 'entidad_id' => $id]);
+
+        $this->actingAs($this->analista);
+        Livewire::test(ViewProceso::class, ['record' => $this->proceso->getRouteKey()])->assertSee('Descargar oferta (ZIP)');
     }
 }

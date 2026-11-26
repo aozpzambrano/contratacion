@@ -67,7 +67,7 @@ class DocumentosTest extends TestCase
         $d = $this->subir($p, $unidad, 'INFORME_NECESIDAD', 'informe.docx');
 
         $this->assertSame('BORRADOR', $d->estadoDocumento->codigo);
-        $this->assertSame('Informe de necesidad', $d->titulo);
+        $this->assertSame('informe', $d->titulo, 'el titulo es el nombre del archivo sin extension');
         $this->assertSame(1, $d->versionActual->numero_version);
 
         $archivo = $d->versionActual->archivo;
@@ -143,6 +143,20 @@ class DocumentosTest extends TestCase
         $this->servicio->agregarVersion($d->fresh(), $this->temporal("%PDF-1.4\nx"), 'otra.pdf', null, $unidad);
     }
 
+    public function test_otros_documentos_se_habilita_fuera_de_inicio_para_quien_puede_subir(): void
+    {
+        [$unidad, $p] = $this->unidadConProceso();
+        $this->assertFalse($this->servicio->tiposDisponibles($p, $unidad)->contains('Otros documentos'));
+
+        // el estado solo cambia por transicion: se habilita el cambio directo unicamente para esta comprobacion
+        DB::select("select set_config('app.transicion_en_curso', 'procesos', false)");
+        DB::table('procesos')->where('id', $p->id)
+            ->update(['estado_proceso_id' => DB::table('estados_proceso')->where('codigo', 'EN_CORRECCION')->value('id')]);
+        DB::select("select set_config('app.transicion_en_curso', '', false)");
+
+        $this->assertTrue($this->servicio->tiposDisponibles($p->fresh(), $unidad)->contains('Otros documentos'));
+    }
+
     public function test_cada_rol_solo_ve_los_tipos_de_su_fase_y_de_su_rol(): void
     {
         [$unidad, $p] = $this->unidadConProceso();
@@ -151,6 +165,9 @@ class DocumentosTest extends TestCase
         $this->assertTrue($tipos->contains('Informe de necesidad'));
         $this->assertTrue($tipos->contains('Especificaciones tecnicas'));
         $this->assertFalse($tipos->contains('Orden de compra'));
+
+        // en Inicio la unidad carga solo esos dos tipos: ni "Otros documentos" ni ningun otro
+        $this->assertEqualsCanonicalizing(['Informe de necesidad', 'Especificaciones tecnicas'], $tipos->all());
 
         $otra = User::factory()->conRoles('UNIDAD_REQUIRENTE')->create();
         $this->assertTrue($this->servicio->tiposDisponibles($p, $otra)->isEmpty(), 'otra unidad no ve el proceso');
@@ -266,6 +283,12 @@ class DocumentosTest extends TestCase
     public function test_el_memorando_de_publicacion_es_solo_pdf_y_admite_varios(): void
     {
         [$unidad, $p] = $this->unidadConProceso();
+        // en Inicio solo se cargan Informe de Necesidad y Especificaciones Tecnicas: el memorando se sube en una etapa posterior
+        DB::select("select set_config('app.transicion_en_curso', 'procesos', false)");
+        DB::table('procesos')->where('id', $p->id)
+            ->update(['estado_proceso_id' => DB::table('estados_proceso')->where('codigo', 'EN_CORRECCION')->value('id')]);
+        DB::select("select set_config('app.transicion_en_curso', '', false)");
+        $p = $p->fresh();
 
         $this->subir($p, $unidad, 'MEMORANDO_SOLICITUD_PUBLICACION', 'memo1.pdf');
         $this->subir($p, $unidad, 'MEMORANDO_SOLICITUD_PUBLICACION', 'memo2.pdf');
@@ -355,5 +378,37 @@ class DocumentosTest extends TestCase
         Livewire::test(DocumentosRelationManager::class, ['ownerRecord' => $p, 'pageClass' => ViewProceso::class])
             ->assertCanSeeTableRecords([$d])
             ->assertTableActionHidden('nueva_version', $d);
+    }
+
+    public function test_el_selector_de_archivos_se_limita_a_los_formatos_del_tipo(): void
+    {
+        $memorando = TipoDocumento::where('codigo', 'MEMORANDO_SOLICITUD_PUBLICACION')->firstOrFail();
+        $this->assertSame(['application/pdf'], $memorando->mimesPermitidos());
+        $this->assertSame('PDF', $memorando->formatosLegibles());
+
+        $distributivo = TipoDocumento::where('codigo', 'DISTRIBUTIVO')->firstOrFail();
+        $this->assertEqualsCanonicalizing([
+            'application/pdf', 'application/msword', 'application/vnd.ms-excel',
+            'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+            'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+        ], $distributivo->mimesPermitidos());
+        $this->assertSame('PDF, Word o Excel', $distributivo->formatosLegibles());
+    }
+
+    public function test_el_titulo_es_el_nombre_del_archivo_o_el_digitado_o_el_del_tipo(): void
+    {
+        $tipo = TipoDocumento::where('codigo', 'INFORME_NECESIDAD')->firstOrFail();
+
+        $this->assertSame('Informe final 2026', $this->servicio->tituloDelDocumento($tipo, null, 'Informe final 2026.pdf'));
+        $this->assertSame('Mi titulo', $this->servicio->tituloDelDocumento($tipo, '  Mi titulo ', 'otro.pdf'), 'lo digitado se respeta');
+        $this->assertSame('Informe de necesidad', $this->servicio->tituloDelDocumento($tipo, null, '.pdf'), 'sin nombre util: el del tipo');
+        $this->assertSame('Informe de necesidad', $this->servicio->tituloDelDocumento($tipo, '', ''));
+        $this->assertSame('Informe de necesidad', $this->servicio->tituloDelDocumento($tipo, null, "\xC3\x28.pdf"), 'nombre mal codificado: el del tipo');
+        $this->assertSame(250, mb_strlen($this->servicio->tituloDelDocumento($tipo, null, str_repeat('a', 400).'.pdf')));
+
+        // varios archivos a la vez: cada documento toma el nombre de su archivo
+        [$unidad, $p] = $this->unidadConProceso();
+        $a = $this->subir($p, $unidad, 'ESPECIFICACIONES_TECNICAS', 'especificaciones_v1.pdf');
+        $this->assertSame('especificaciones_v1', $a->titulo);
     }
 }

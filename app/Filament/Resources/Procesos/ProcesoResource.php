@@ -7,6 +7,7 @@ use App\Filament\Resources\Procesos\Pages\EditProceso;
 use App\Filament\Resources\Procesos\Pages\ListProcesos;
 use App\Filament\Resources\Procesos\Pages\ViewProceso;
 use App\Filament\Resources\Procesos\RelationManagers\DocumentosRelationManager;
+use App\Filament\Resources\Procesos\RelationManagers\HistorialRelationManager;
 use App\Filament\Resources\Procesos\Schemas\ProcesoForm;
 use App\Filament\Resources\Procesos\Schemas\ProcesoInfolist;
 use App\Filament\Resources\Procesos\Tables\ProcesosTable;
@@ -60,7 +61,7 @@ class ProcesoResource extends Resource
 
     public static function getRelations(): array
     {
-        return [DocumentosRelationManager::class];
+        return [DocumentosRelationManager::class, HistorialRelationManager::class];
     }
 
     public static function getPages(): array

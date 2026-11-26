@@ -210,7 +210,8 @@ BEGIN
     PERFORM pg_temp.falla(format('SELECT aplicar_transicion_proceso(%s,%L,%s)',v_p,'remitir_legalizados',u_ca),'no tiene el permiso');
     -- documentos que acompanan al memorando: sin ellos no se remite
     PERFORM pg_temp.falla(format('SELECT aplicar_transicion_proceso(%s,%L,%s)',v_p,'remitir_legalizados',u_ur),'Fichas tecnicas');
-    FOREACH v_cod IN ARRAY ARRAY['FICHAS_TECNICAS','CERTIFICADO_NO_CATALOGADO','VALIDACION_FIRMAS_ELECTRONICAS','AUTORIZACION_REQUERIMIENTO'] LOOP
+    PERFORM pg_temp.falla(format('SELECT aplicar_transicion_proceso(%s,%L,%s)',v_p,'remitir_legalizados',u_ur),'Distributivo');
+    FOREACH v_cod IN ARRAY ARRAY['DISTRIBUTIVO','FICHAS_TECNICAS','CERTIFICADO_NO_CATALOGADO','VALIDACION_FIRMAS_ELECTRONICAS','AUTORIZACION_REQUERIMIENTO'] LOOP
         v_tmp := pg_temp.cargar_documento(v_p,v_cod,u_ur);
         PERFORM aplicar_transicion_documento(v_tmp,'registrar_sin_revision',u_ur);
     END LOOP;
@@ -299,6 +300,16 @@ BEGIN
     INSERT INTO ofertas (proceso_id,publicacion_id,proveedor_id,estado_oferta_id,creado_por)
         VALUES (v_p,v_pub1,v_prov[1],v_est_oferta,u_ca) RETURNING id INTO v_tmp; v_of[1] := v_tmp;
     INSERT INTO oferta_items (proceso_id,oferta_id,proceso_item_id,precio_unitario) VALUES (v_p,v_of[1],v_it1,0.55),(v_p,v_of[1],v_it2,0.55);
+    -- remitir ofertas exige la Necesidad de contratacion finalizada y los dos memorandos de la comision, legalizados
+    PERFORM pg_temp.falla(format('SELECT aplicar_transicion_proceso(%s,%L,%s)',v_p,'remitir_ofertas',u_ca),'Faltan documentos requeridos');
+    FOR i IN 1..3 LOOP
+        v_tmp := pg_temp.cargar_documento(v_p, CASE i WHEN 1 THEN 'NECESIDAD_CONTRATACION_FINALIZADA' WHEN 2 THEN 'MEMORANDO_SOLICITUD_DESIGNACION_COMISION' ELSE 'MEMORANDO_DESIGNACION_COMISION' END, u_ca);
+        PERFORM aplicar_transicion_documento(v_tmp,'registrar_sin_revision',u_ca);
+        IF i = 1 THEN
+            PERFORM pg_temp.falla(format('SELECT aplicar_transicion_proceso(%s,%L,%s)',v_p,'remitir_ofertas',u_ca),'Faltan documentos requeridos');
+        END IF;
+        PERFORM aplicar_transicion_documento(v_tmp,'registrar_legalizado',u_ca);
+    END LOOP;
     -- las decisiones del flujo solo existen despues de registrar las ofertas de la ultima publicacion
     PERFORM pg_temp.falla(format('SELECT aplicar_transicion_proceso(%s,%L,%s)',v_p,'remitir_ofertas',u_cj),'Aun no se registraron las ofertas');
     PERFORM pg_temp.falla(format('SELECT aplicar_transicion_proceso(%s,%L,%s)',v_p,'republicar',u_ca),'Aun no se registraron las ofertas');
@@ -323,20 +334,9 @@ BEGIN
     PERFORM pg_temp.falla(format('SELECT aplicar_transicion_proceso(%s,%L,%s)',v_p,'republicar',u_ca),'La decision del flujo de ofertas');
     PERFORM pg_temp.falla(format('INSERT INTO oferta_items (proceso_id,oferta_id,proceso_item_id,precio_unitario) VALUES (%s,%s,%s,1)',v_p,v_of[1],v_it1),'unique');
     PERFORM aplicar_transicion_proceso(v_p,'remitir_ofertas',u_cj);
-    PERFORM pg_temp.verifica((SELECT ep.codigo FROM procesos p JOIN estados_proceso ep ON ep.id=p.estado_proceso_id WHERE p.id=v_p)='PARA_DOCUMENTACION',
-        'remitir ofertas pasa el proceso a la unidad (Para documentacion)');
-    PERFORM pg_temp.falla(format('SELECT aplicar_transicion_proceso(%s,%L,%s)',v_p,'remitir_documentacion',u_ur),'Faltan documentos requeridos');
-    FOR i IN 1..2 LOOP
-        v_tmp := pg_temp.cargar_documento(v_p, CASE i WHEN 1 THEN 'ESTUDIO_MERCADO' ELSE 'CERTIFICACION_POA' END, u_ur);
-        PERFORM aplicar_transicion_documento(v_tmp,'registrar_sin_revision',u_ur);
-        IF i = 1 THEN
-            PERFORM pg_temp.falla(format('SELECT aplicar_transicion_proceso(%s,%L,%s)',v_p,'remitir_documentacion',u_ur),'Faltan documentos requeridos');
-        END IF;
-        PERFORM aplicar_transicion_documento(v_tmp,'legalizar',u_ur);
-    END LOOP;
-    PERFORM aplicar_transicion_proceso(v_p,'remitir_documentacion',u_ur);
-    PERFORM pg_temp.verifica((SELECT ep.codigo FROM procesos p JOIN estados_proceso ep ON ep.id=p.estado_proceso_id WHERE p.id=v_p)='PARA_COMISION',
-        'con Estudio de Mercado y Certificacion POA legalizados el proceso va a Para comision');
+    PERFORM pg_temp.verifica((SELECT ep.codigo||'/'||em.codigo FROM procesos p JOIN estados_proceso ep ON ep.id=p.estado_proceso_id
+        JOIN estados_macro em ON em.id=p.estado_macro_id WHERE p.id=v_p)='EN_COMISION/PRECONTRACTUAL',
+        'remitir ofertas pasa el proceso a la Comision Tecnica (Precontractual)');
     PERFORM pg_temp.verifica((SELECT total FROM v_ofertas_totales WHERE oferta_id=v_of[3])=41000.00
         AND (SELECT ofertas FROM v_procesos WHERE proceso_id=v_p)=3,'totales de ofertas calculados y 3 ofertas contadas');
 
@@ -345,19 +345,25 @@ BEGIN
         AND tipo_designacion_sugerido(150000)=(SELECT id FROM tipos_designacion WHERE codigo='COMISION')
         AND tipo_designacion_sugerido(600000)=(SELECT id FROM tipos_designacion WHERE codigo='COMISION_FINANCIERO_JURIDICO'),
         'tipo de designacion sugerido segun umbrales (equivale a la formula del Excel)');
-    PERFORM pg_temp.falla(format('SELECT aplicar_transicion_proceso(%s,%L,%s)',v_p,'iniciar_comision',u_ca),'No existe una designacion');
-    INSERT INTO designaciones (proceso_id,tipo_designacion_id,monto_referencia)
-        VALUES (v_p,tipo_designacion_sugerido(66000),66000) RETURNING id INTO v_td;
-    INSERT INTO documentos (proceso_id,tipo_documento_id,estado_documento_id,titulo,numero_documento,designacion_id,creado_por)
-        VALUES (v_p,(SELECT id FROM tipos_documento WHERE codigo='MEMORANDO_DESIGNACION'),
-                (SELECT id FROM estados_documento WHERE codigo='BORRADOR'),'Memo designacion','AIL E.P.-SGG-2026-0044-M',v_td,u_ca);
-    PERFORM aplicar_transicion_proceso(v_p,'iniciar_comision',u_ca);
-    PERFORM pg_temp.falla(format('SELECT aplicar_transicion_proceso(%s,%L,%s)',v_p,'aprobar_seleccion',u_ct),'No existe una oferta seleccionada');
     PERFORM aplicar_transicion_oferta(v_of[3],'iniciar_evaluacion',u_ct);
     PERFORM aplicar_transicion_oferta(v_of[3],'marcar_seleccionable',u_ct);
     PERFORM pg_temp.falla(format('SELECT aplicar_transicion_oferta(%s,%L,%s)',v_of[3],'seleccionar',u_ca),'no tiene el permiso');
     PERFORM aplicar_transicion_oferta(v_of[3],'seleccionar',u_ct);
-    PERFORM aplicar_transicion_proceso(v_p,'aprobar_seleccion',u_ct);
+    -- La Comision Tecnica remite su informe: solo ella, y con los cuatro documentos legalizados
+    PERFORM pg_temp.falla(format('SELECT aplicar_transicion_proceso(%s,%L,%s)',v_p,'remitir_informe_seleccion',u_ca),'no tiene el permiso');
+    PERFORM pg_temp.falla(format('SELECT aplicar_transicion_proceso(%s,%L,%s)',v_p,'remitir_informe_seleccion',u_ct),'Faltan documentos requeridos');
+    FOR i IN 1..4 LOOP
+        v_tmp := pg_temp.cargar_documento(v_p, CASE i WHEN 1 THEN 'MEMORANDO_REMISION_INFORME' WHEN 2 THEN 'INFORME_SELECCION_PROVEEDOR'
+                 WHEN 3 THEN 'ACTA_RECEPCION_OFERTAS' ELSE 'VALIDACION_FIRMAS_INFORME' END, u_ct);
+        PERFORM aplicar_transicion_documento(v_tmp,'registrar_sin_revision',u_ct);
+        IF i < 4 THEN
+            PERFORM aplicar_transicion_documento(v_tmp,'registrar_legalizado',u_ct);
+            PERFORM pg_temp.falla(format('SELECT aplicar_transicion_proceso(%s,%L,%s)',v_p,'remitir_informe_seleccion',u_ct),'Faltan documentos requeridos');
+        END IF;
+    END LOOP;
+    PERFORM pg_temp.falla(format('SELECT aplicar_transicion_proceso(%s,%L,%s)',v_p,'remitir_informe_seleccion',u_ct),'Faltan documentos requeridos');
+    PERFORM aplicar_transicion_documento(v_tmp,'registrar_legalizado',u_ct);
+    PERFORM aplicar_transicion_proceso(v_p,'remitir_informe_seleccion',u_ct);
 
     -- 8. Orden de compra, entregas y cierre
     PERFORM aplicar_transicion_proceso(v_p,'generar_expediente',u_cj);
@@ -373,8 +379,11 @@ BEGIN
     PERFORM pg_temp.verifica((SELECT em.codigo||'/'||ep.codigo FROM procesos p JOIN estados_macro em ON em.id=p.estado_macro_id
         JOIN estados_proceso ep ON ep.id=p.estado_proceso_id WHERE p.id=v_p)='FINALIZADO/CIERRE',
         'flujo completo hasta FINALIZADO/CIERRE');
-    PERFORM pg_temp.verifica((SELECT count(*) FROM historial_estados_proceso WHERE proceso_id=v_p)=19,
-        'historial del proceso con 19 movimientos');
+    PERFORM pg_temp.verifica((SELECT count(*) FROM historial_estados_proceso WHERE proceso_id=v_p)=18,
+        'historial del proceso con 17 movimientos y el documento eliminado');
+    PERFORM pg_temp.verifica((SELECT count(*) FROM historial_estados_proceso h JOIN transiciones_proceso t ON t.id=h.transicion_id
+        WHERE h.proceso_id=v_p AND t.codigo='eliminar_documento' AND h.comentario LIKE 'Documento eliminado:%Motivo: Se reemplaza')=1,
+        'el documento eliminado queda en el historial del proceso');
 
     -- 9. Devolucion y reapertura (el analista decide segun el memorando)
     INSERT INTO procesos (tipo_proceso_id,objeto_contratacion,estado_macro_id,estado_proceso_id,creado_por)
@@ -386,7 +395,7 @@ BEGIN
                         estado_macro_id=(SELECT id FROM estados_macro WHERE codigo='PRECONTRACTUAL') WHERE id=v_p2;
     PERFORM set_config('app.transicion_en_curso','',true);
     INSERT INTO publicaciones (proceso_id,secuencia,codigo_nc,fecha_publicacion,fecha_limite)
-        VALUES (v_p2,1,'NC-REAB',now(),now()),(v_p2,2,'NC-REAB',now(),now());
+        VALUES (v_p2,1,'NC-REAB',now(),now()+interval '1 hour'),(v_p2,2,'NC-REAB',now(),now()+interval '1 hour');
     PERFORM pg_temp.falla(format('SELECT aplicar_transicion_proceso(%s,%L,%s,%L)',v_p2,'devolver_expediente',u_ca,'Sin ofertas'),'Faltan documentos requeridos');
     FOR i IN 1..2 LOOP
         v_tmp := pg_temp.cargar_documento(v_p2, CASE i WHEN 1 THEN 'MEMORANDO_DEVOLUCION' ELSE 'INFORME_DEVOLUCION_SIN_OFERTAS' END, u_ca);
@@ -405,7 +414,7 @@ BEGIN
         AND (SELECT ep.codigo FROM procesos p JOIN estados_proceso ep ON ep.id=p.estado_proceso_id WHERE p.id=v_p2)='PARA_REPUBLICAR',
         'reabrir vuelve a Para Re-publicar e incrementa el ciclo');
     INSERT INTO publicaciones (proceso_id,secuencia,codigo_nc,fecha_publicacion,fecha_limite)
-        VALUES (v_p2,1,'NC-REAB',now(),now());
+        VALUES (v_p2,1,'NC-REAB',now(),now()+interval '1 hour');
     PERFORM pg_temp.verifica((SELECT ciclo FROM publicaciones WHERE proceso_id=v_p2 ORDER BY id DESC LIMIT 1)=2,
         'nuevo ciclo permite otra publicacion secuencia 1 con el mismo NC');
 

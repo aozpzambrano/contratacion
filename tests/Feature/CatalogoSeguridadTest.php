@@ -12,7 +12,7 @@ class CatalogoSeguridadTest extends TestCase
 
     public function test_la_migracion_carga_roles_fases_y_permisos(): void
     {
-        $this->assertSame(10, DB::table('roles')->count());
+        $this->assertSame(7, DB::table('roles')->count());
         $this->assertSame(3, DB::table('fases')->count());
         $this->assertGreaterThan(40, DB::table('permisos')->count());
     }
@@ -23,7 +23,7 @@ class CatalogoSeguridadTest extends TestCase
         $this->assertSame(0, $malos);
     }
 
-    public function test_descarga_de_expediente_solo_para_analista_unidad_requirente_y_admin_contrato(): void
+    public function test_descarga_de_expediente_solo_para_analista_comision_unidad_requirente_y_admin_contrato(): void
     {
         $roles = DB::table('rol_permiso as rp')
             ->join('roles as r', 'r.id', '=', 'rp.rol_id')
@@ -33,7 +33,7 @@ class CatalogoSeguridadTest extends TestCase
             ->pluck('r.codigo')
             ->all();
 
-        $this->assertSame(['ADMIN_CONTRATO', 'COMPRAS_ANALISTA', 'UNIDAD_REQUIRENTE'], $roles);
+        $this->assertSame(['ADMIN_CONTRATO', 'COMISION_TECNICA', 'COMPRAS_ANALISTA', 'UNIDAD_REQUIRENTE'], $roles);
     }
 
     public function test_solo_el_administrador_ve_modulos_de_administracion(): void

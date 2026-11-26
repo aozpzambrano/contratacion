@@ -18,7 +18,7 @@ class User extends Authenticatable implements FilamentUser
     use HasFactory, Notifiable;
 
     protected $fillable = [
-        'name', 'email', 'password', 'cedula', 'cargo', 'unidad', 'activo',
+        'name', 'email', 'password', 'cedula', 'cargo', 'unidad', 'activo', 'debe_cambiar_clave',
     ];
 
     protected $hidden = ['password', 'remember_token'];
@@ -32,6 +32,7 @@ class User extends Authenticatable implements FilamentUser
             'email_verified_at' => 'datetime',
             'password' => 'hashed',
             'activo' => 'boolean',
+            'debe_cambiar_clave' => 'boolean',
         ];
     }
 

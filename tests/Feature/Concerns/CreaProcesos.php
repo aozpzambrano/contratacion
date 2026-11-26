@@ -88,11 +88,14 @@ trait CreaProcesos
             $legalizados[$documento->id] = $this->pdfTemporal(Str::slug($documento->titulo, '_').'_firmado.pdf');
         }
 
-        // fichas tecnicas, certificados, etc. que aun no tiene el proceso (dos archivos del primer tipo)
+        // fichas tecnicas, certificados, etc. que aun no tiene el proceso (dos archivos de fichas tecnicas)
         $adicionales = [];
-        foreach (app(ServicioLegalizacion::class)->tiposAdicionalesPendientes($p) as $i => $tipo) {
+        foreach (app(ServicioLegalizacion::class)->tiposAdicionalesPendientes($p) as $tipo) {
+            if ($tipo->codigo === 'DISTRIBUTIVO' && $distributivos !== []) {
+                continue; // el Distributivo se entrega por su propio campo
+            }
             $adicionales[$tipo->id] = [$this->pdfTemporal($tipo->codigo.'_1.pdf')];
-            if ($i === 0) {
+            if ($tipo->codigo === 'FICHAS_TECNICAS') {
                 $adicionales[$tipo->id][] = $this->pdfTemporal($tipo->codigo.'_2.pdf');
             }
         }
