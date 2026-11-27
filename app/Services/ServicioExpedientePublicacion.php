@@ -149,6 +149,76 @@ class ServicioExpedientePublicacion
             throw new DomainException('Seleccione al menos un documento para el expediente.');
         }
 
+        return $this->construirZip($proceso, $usuario, $disponibles, $claves, 'expediente.publicacion_generado', 'Expediente_Publicacion_');
+    }
+
+    /** Fase del proceso (codigo) segun su macro estado. */
+    private function codigoFase(Proceso $proceso): ?string
+    {
+        return DB::table('estados_macro as em')->join('fases as f', 'f.id', '=', 'em.fase_id')
+            ->where('em.id', $proceso->estado_macro_id)->value('f.codigo');
+    }
+
+    /** Boton "Fase Preparatoria": Compras, una vez el proceso salio de la fase preparatoria (ya esta en Precontractual o despues). */
+    public function puedeGenerarFasePreparatoria(Proceso $proceso, User $usuario): bool
+    {
+        return $usuario->activo
+            && ($usuario->tieneRol('COMPRAS_JEFE') || $usuario->tieneRol('COMPRAS_ANALISTA'))
+            && $usuario->tienePermiso('expedientes.generar_publicacion')
+            && $this->documentos->puedeVerProceso($proceso, $usuario)
+            && ! in_array($this->codigoFase($proceso), [null, 'PREPARATORIA'], true);
+    }
+
+    /**
+     * Elementos del zip de la Fase Preparatoria: documentos de esa fase (incluidos los "Otros documentos" cargados antes de
+     * remitir las ofertas) y los documentos fijos.
+     *
+     * @return Collection<string, array{clave: string, etiqueta: string, marcado: bool}>
+     */
+    public function opcionesFasePreparatoria(Proceso $proceso): Collection
+    {
+        $codigos = array_merge(self::ORDEN_TIPOS, ['OTROS']);
+        $opciones = $this->opciones($proceso)->filter(function (array $o) use ($codigos, $proceso) {
+            if (! str_starts_with($o['clave'], 'doc_')) {
+                return true; // documentos fijos
+            }
+            $doc = Documento::with('tipoDocumento')->where('proceso_id', $proceso->id)->find((int) substr($o['clave'], 4));
+            $tipo = $doc?->tipoDocumento->codigo;
+            if (! in_array($tipo, $codigos, true)) {
+                return false;
+            }
+
+            if ($tipo !== 'OTROS') {
+                return true;
+            }
+
+            // "Otros" de la fase preparatoria: los de la Comision Tecnica pertenecen a la fase precontractual
+            return ! User::find($doc->creado_por)?->tieneRol('COMISION_TECNICA');
+        });
+
+        return $opciones;
+    }
+
+    /**
+     * @return array{0: string, 1: string} [ruta del zip temporal, "FasePreparatoria-<codigo>.zip"]
+     */
+    public function generarFasePreparatoria(Proceso $proceso, User $usuario): array
+    {
+        if (! $this->puedeGenerarFasePreparatoria($proceso, $usuario)) {
+            throw new DomainException('No puede generar el expediente de la fase preparatoria en este momento.');
+        }
+
+        $disponibles = $this->opcionesFasePreparatoria($proceso);
+        if ($disponibles->isEmpty()) {
+            throw new DomainException('El proceso no tiene documentos de la fase preparatoria.');
+        }
+
+        return $this->construirZip($proceso, $usuario, $disponibles, $disponibles->keys()->all(), 'expediente.fase_preparatoria_generado', 'FasePreparatoria-');
+    }
+
+    /** @return array{0: string, 1: string} */
+    private function construirZip(Proceso $proceso, User $usuario, Collection $disponibles, array $claves, string $evento, string $prefijo): array
+    {
         $ruta = tempnam(sys_get_temp_dir(), 'expediente_');
         $zip = new ZipArchive;
         if ($zip->open($ruta, ZipArchive::CREATE | ZipArchive::OVERWRITE) !== true) {
@@ -184,7 +254,7 @@ class ServicioExpedientePublicacion
 
         DB::table('auditoria')->insert([
             'user_id' => $usuario->id,
-            'evento' => 'expediente.publicacion_generado',
+            'evento' => $evento,
             'entidad' => 'procesos',
             'entidad_id' => $proceso->id,
             'valores_nuevos' => json_encode(['elementos' => $claves]),
@@ -193,7 +263,7 @@ class ServicioExpedientePublicacion
 
         $codigo = $proceso->codigo ? preg_replace('/[^A-Za-z0-9_-]/', '', $proceso->codigo) : 'proceso_'.$proceso->id;
 
-        return [$ruta, "Expediente_Publicacion_{$codigo}.zip"];
+        return [$ruta, "{$prefijo}{$codigo}.zip"];
     }
 
     /** @return array{0: string, 1: string, 2: bool, 3: ?string} [ruta local, nombre, temporal, carpeta] */

@@ -4,6 +4,7 @@ namespace App\Filament\Resources\Procesos\Pages;
 
 use App\Filament\Resources\Procesos\ProcesoResource;
 use App\Models\Proceso;
+use App\Models\TransicionProceso;
 use App\Models\User;
 use App\Services\ServicioDevolucionSinOfertas;
 use App\Services\ServicioDocumento;
@@ -12,7 +13,9 @@ use App\Services\ServicioLegalizacion;
 use App\Services\ServicioOferta;
 use App\Services\ServicioPublicacion;
 use App\Services\ServicioProceso;
+use App\Services\ServicioEnvioRevision;
 use App\Services\ServicioInformeComision;
+use App\Services\ServicioRemisionCertificaciones;
 use App\Services\ServicioRemisionOfertas;
 use DomainException;
 use Filament\Actions\Action;
@@ -48,8 +51,13 @@ class ViewProceso extends ViewRecord
         foreach ($servicio->transicionesDisponibles($proceso, $usuario) as $transicion) {
             // "Remitir documentos legalizados" tiene su propio formulario (PDF firmados, memorando y publicaciones)
             if (in_array($transicion->codigo, ServicioLegalizacion::TRANSICIONES, true)) {
-                $acciones[] = $this->accionRemitirLegalizados($proceso, $usuario);
+                $acciones[] = $this->accionRemitirLegalizados($proceso, $usuario, $transicion->codigo === ServicioLegalizacion::REABRIR);
 
+                continue;
+            }
+
+            // "Reabrir" del analista solo lo usa internamente la devolucion sin ofertas: en Para reapertura reabre la unidad
+            if ($transicion->codigo === 'reabrir') {
                 continue;
             }
 
@@ -66,6 +74,20 @@ class ViewProceso extends ViewRecord
 
             // La devolucion sin ofertas (desde Publicado) incluye la reapertura y sus dos PDF: tiene su propia accion.
             if ($transicion->codigo === 'devolver_expediente' && $proceso->estadoProceso?->codigo === 'PUBLICADO') {
+                continue;
+            }
+
+            // "Enviar a revision" / "Reenviar": la unidad carga los documentos en el propio formulario del boton
+            if (in_array($transicion->codigo, ServicioEnvioRevision::TRANSICIONES, true)) {
+                $acciones[] = $this->accionEnviarARevision($transicion, $proceso, $usuario);
+
+                continue;
+            }
+
+            // La unidad registra las cuatro certificaciones (formulario propio)
+            if ($transicion->codigo === ServicioRemisionCertificaciones::TRANSICION) {
+                $acciones[] = $this->accionRemitirCertificaciones($proceso, $usuario);
+
                 continue;
             }
 
@@ -124,7 +146,7 @@ class ViewProceso extends ViewRecord
                 ->schema([
                     Select::make('analista_id')
                         ->label('Analista de Compras')
-                        ->options(fn () => $servicio->analistasDisponibles())
+                        ->options(fn () => $servicio->analistasConCarga())
                         ->searchable()
                         ->required(),
                 ])
@@ -243,7 +265,7 @@ class ViewProceso extends ViewRecord
                         Hidden::make('nombres_archivos'),
                         FileUpload::make('archivos')
                             ->label('Oferta del proveedor (arrastre la carpeta o seleccione los archivos)')
-                            ->helperText('PDF, Word, Excel, imágenes o ZIP. Puede cargar varios archivos a la vez; los nombres se conservan.')
+                            ->helperText('PDF, Word, Excel o ZIP. Puede cargar varios archivos a la vez; los nombres se conservan.')
                             ->disk(ServicioDocumento::DISCO)
                             ->directory('temporal')
                             ->visibility('private')
@@ -254,7 +276,6 @@ class ViewProceso extends ViewRecord
                                 'application/vnd.ms-excel',
                                 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
                                 'application/zip', 'application/x-zip-compressed',
-                                'image/jpeg', 'image/png',
                             ])
                             ->multiple()
                             ->maxFiles(ServicioOferta::MAX_ARCHIVOS_POR_OFERTA)
@@ -325,7 +346,7 @@ class ViewProceso extends ViewRecord
      * Un solo formulario: PDF legalizados (firmados electronicamente) de los documentos que lo exigen,
      * memorando de solicitud de publicacion, su numero y las horas de cada publicacion.
      */
-    private function accionRemitirLegalizados(Proceso $proceso, User $usuario): Action
+    private function accionRemitirLegalizados(Proceso $proceso, User $usuario, bool $reapertura = false): Action
     {
         $pendientes = app(ServicioDocumento::class)->documentosPorLegalizar($proceso)->load('tipoDocumento:id,nombre');
 
@@ -404,15 +425,17 @@ class ViewProceso extends ViewRecord
                 ->required(fn (Get $get) => (int) $get('numero_publicaciones') >= $n);
         }
 
-        return Action::make('transicion_remitir_legalizados')
-            ->label('Remitir documentos legalizados')
-            ->icon('heroicon-o-paper-airplane')
-            ->modalHeading('Remitir documentos legalizados')
-            ->modalDescription('Al confirmar, la documentación legalizada pasa al área para su publicación.')
-            ->modalSubmitActionLabel('Remitir')
+        return Action::make($reapertura ? 'transicion_reabrir_unidad' : 'transicion_remitir_legalizados')
+            ->label($reapertura ? 'Reabrir proceso' : 'Remitir documentos legalizados')
+            ->icon($reapertura ? 'heroicon-o-arrow-path' : 'heroicon-o-paper-airplane')
+            ->modalHeading($reapertura ? 'Reabrir proceso' : 'Remitir documentos legalizados')
+            ->modalDescription($reapertura
+                ? 'Se abre un nuevo ciclo: los datos del ciclo anterior quedan en el historial y el nuevo memorando se guarda en Documentos.'
+                : 'Al confirmar, la documentación legalizada pasa al área para su publicación.')
+            ->modalSubmitActionLabel($reapertura ? 'Reabrir' : 'Remitir')
             ->modalWidth('3xl')
             ->schema($campos)
-            ->action(function (array $data) use ($proceso, $usuario, $pendientes, $adicionales) {
+            ->action(function (array $data) use ($proceso, $usuario, $pendientes, $adicionales, $reapertura) {
                 $archivo = fn (string $campo): array => [$this->rutaSubida($data[$campo]), $this->rutaSubida($data['nombre_'.$campo] ?? $data[$campo])];
 
                 $legalizados = [];
@@ -439,7 +462,7 @@ class ViewProceso extends ViewRecord
 
                 $this->ejecutar(fn () => app(ServicioLegalizacion::class)->remitir(
                     $proceso, $usuario, $legalizados, $archivo('memorando'), (string) $data['numero_memorando'], $horas, $extras, $distributivos
-                ), 'Documentos legalizados remitidos a Compras');
+                ), $reapertura ? 'Proceso reabierto: nuevo ciclo remitido a Compras' : 'Documentos legalizados remitidos a Compras');
             });
     }
 
@@ -482,6 +505,74 @@ class ViewProceso extends ViewRecord
                         ->body("Usuario: {$c['usuario']} — Clave inicial: {$c['clave']}. Entréguelas a la comisión.")
                         ->success()->persistent()->send();
                 }, 'Ofertas remitidas a la Comisión Técnica');
+            });
+    }
+
+    /** La unidad envia el proceso a revision cargando alli sus documentos (primer envio) o las versiones corregidas (reenvio). */
+    private function accionEnviarARevision(TransicionProceso $transicion, Proceso $proceso, User $usuario): Action
+    {
+        $campos = app(ServicioEnvioRevision::class)->campos($proceso);
+        $reenvio = $proceso->estadoProceso?->codigo === 'EN_CORRECCION';
+
+        return Action::make('transicion_'.$transicion->codigo)
+            ->label($transicion->nombre)
+            ->modalHeading($transicion->nombre)
+            ->modalDescription($reenvio
+                ? 'Cargue una nueva versión de cada documento con observaciones.'
+                : 'Cargue los documentos del proceso, ambos son obligatorios para la revisión.')
+            ->modalSubmitActionLabel('Enviar')
+            ->schema(collect($campos)->map(fn (array $c) => FileUpload::make($c['clave'])
+                ->label($c['etiqueta'].' ('.$c['tipo']->formatosLegibles().')')
+                ->helperText($c['documento'] !== null && ! $c['obligatorio'] ? 'Ya está cargado: adjunte un archivo solo si desea reemplazarlo con una versión nueva.' : null)
+                ->disk(ServicioDocumento::DISCO)
+                ->directory('temporal')
+                ->visibility('private')
+                ->acceptedFileTypes($c['tipo']->mimesPermitidos())
+                ->storeFileNamesIn('nombre_'.$c['clave'])
+                ->required($c['obligatorio']))->all())
+            ->action(function (array $data) use ($proceso, $usuario, $campos, $reenvio) {
+                $archivos = [];
+                foreach ($campos as $c) {
+                    $clave = $c['clave'];
+                    $ruta = $this->rutaSubida($data[$clave] ?? null);
+                    $archivos[$clave] = [$ruta !== '' ? $ruta : null, $this->rutaSubida($data['nombre_'.$clave] ?? null) ?: null];
+                }
+
+                $this->ejecutar(fn () => app(ServicioEnvioRevision::class)->enviar($proceso, $usuario, $archivos),
+                    $reenvio ? 'Documentos corregidos: proceso enviado de nuevo a revisión' : 'Proceso enviado a revisión');
+            });
+    }
+
+    /** La unidad requirente registra Certificacion POA, PAC, Presupuestaria y Autorizacion de gasto (un PDF legalizado cada uno). */
+    private function accionRemitirCertificaciones(Proceso $proceso, User $usuario): Action
+    {
+        return Action::make('transicion_remitir_certificaciones')
+            ->label('Remitir certificaciones')
+            ->icon('heroicon-o-paper-airplane')
+            ->modalHeading('Remitir certificaciones')
+            ->modalDescription('Cargue los documentos PDF legalizados por cada ítem.')
+            ->modalSubmitActionLabel('Remitir')
+            ->schema(collect(ServicioRemisionCertificaciones::DOCUMENTOS)
+                ->map(fn (array $d, string $campo) => FileUpload::make($campo)
+                    ->label($d[1].' (PDF legalizado; puede adjuntar varios)')
+                    ->disk(ServicioDocumento::DISCO)
+                    ->directory('temporal')
+                    ->visibility('private')
+                    ->acceptedFileTypes(['application/pdf'])
+                    ->multiple()
+                    ->storeFileNamesIn('nombre_'.$campo)
+                    ->required())
+                ->values()->all())
+            ->action(function (array $data) use ($proceso, $usuario) {
+                $archivos = [];
+                foreach (array_keys(ServicioRemisionCertificaciones::DOCUMENTOS) as $campo) {
+                    $nombres = (array) ($data['nombre_'.$campo] ?? []);
+                    foreach ((array) ($data[$campo] ?? []) as $ruta) {
+                        $archivos[$campo][] = [(string) $ruta, (string) ($nombres[$ruta] ?? basename((string) $ruta))];
+                    }
+                }
+
+                $this->ejecutar(fn () => app(ServicioRemisionCertificaciones::class)->remitir($proceso, $usuario, $archivos), 'Certificaciones remitidas');
             });
     }
 
@@ -583,13 +674,19 @@ class ViewProceso extends ViewRecord
         ];
 
         if ($transicion->codigo === 'solicitar_correcciones') {
-            $documentos = app(ServicioDocumento::class)->documentosEnRevision($proceso)->pluck('titulo', 'id');
+            $servicioDoc = app(ServicioDocumento::class);
+            $enRevision = $servicioDoc->documentosEnRevision($proceso);
+            // con una version nueva del analista el documento viene marcado: se debe corregir (no se bloquea la casilla porque
+            // Filament la sacaria de las opciones validas y fallaria validation.in; el servicio la incluye aunque se desmarque)
+            $bloqueados = $enRevision->filter(fn ($d) => $servicioDoc->tieneVersionDelAnalista($d))->pluck('id')->all();
+            $documentos = $enRevision->mapWithKeys(fn ($d) => [$d->id => $d->titulo.(in_array($d->id, $bloqueados, true) ? ' (nueva versión, se debe corregir)' : '')]);
             array_unshift($campos, CheckboxList::make('documentos')
                 ->label('Documentos que la unidad debe corregir')
-                ->helperText('Marque solo los que tienen observaciones: la unidad deberá cargar una nueva versión de cada uno. Los no marcados se consideran correctos.')
+                ->helperText('Marque solo los que tienen observaciones: la unidad deberá cargar una nueva versión de cada uno.')
                 ->options($documentos)
-                ->default($documentos->keys()->all())
-                ->required());
+                ->default($bloqueados)
+                // los bloqueados siempre se remiten (lo garantiza el servicio aunque el formulario no los envie)
+                ->required($bloqueados === []));
         }
 
         return $campos;

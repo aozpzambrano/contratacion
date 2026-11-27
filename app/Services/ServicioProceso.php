@@ -78,11 +78,43 @@ class ServicioProceso
     /**
      * @param  array{documentos?: array<int>|null}  $opciones  documentos: ids con observaciones (solo "Remitir observaciones")
      */
+    /** Ejecuta $principal y despues $despues; devuelve lo del principal. */
+    private function tras(callable $principal, callable $despues): mixed
+    {
+        $resultado = $principal();
+        $despues();
+
+        return $resultado;
+    }
+
+    /**
+     * Tras validar la documentacion el analista deja el proceso: lo asigna de nuevo el Jefe cuando este Legalizado
+     * (ahi se genera el numero del proceso y continua el flujo).
+     */
+    private function retirarAnalista(Proceso $proceso): void
+    {
+        $rolId = Rol::where('codigo', 'COMPRAS_ANALISTA')->value('id');
+        $proceso->asignaciones()->where('rol_id', $rolId)->where('activo', true)->update([
+            'activo' => false,
+            'fecha_fin' => DB::raw('GREATEST(now(), fecha_inicio)'),
+            'updated_at' => DB::raw('now()'),
+        ]);
+    }
+
     public function aplicarTransicion(Proceso $proceso, TransicionProceso $transicion, User $usuario, ?string $comentario = null, array $opciones = []): void
     {
         $comentario = filled($comentario) ? trim($comentario) : null;
 
         $this->ejecutar(function () use ($proceso, $transicion, $usuario, $comentario, $opciones) {
+            // con una version nueva del analista hay cambios pendientes: no se valida la documentacion
+            if ($transicion->codigo === 'validar_documentacion') {
+                $documentos = app(ServicioDocumento::class);
+                $pendiente = $documentos->documentosEnRevision($proceso)->first(fn ($d) => $documentos->tieneVersionDelAnalista($d));
+                if ($pendiente !== null) {
+                    throw new DomainException("No se puede validar la documentación: \"{$pendiente->titulo}\" tiene una nueva versión con cambios pendientes. Remita observaciones para que la unidad lo corrija.");
+                }
+            }
+
             DB::select(
                 'select aplicar_transicion_proceso(?, ?, ?, ?)',
                 [$proceso->id, $transicion->codigo, $usuario->id, $comentario]
@@ -99,7 +131,7 @@ class ServicioProceso
                     => $documentos->registrarObservaciones($proceso, $usuario, $comentario, $opciones['documentos'] ?? null),
                 // validar documentacion: los documentos en revision quedan aprobados
                 $transicion->codigo === 'validar_documentacion'
-                    => $documentos->aprobarDocumentos($proceso, $usuario),
+                    => $this->tras(fn () => $documentos->aprobarDocumentos($proceso, $usuario), fn () => $this->retirarAnalista($proceso)),
                 default => null,
             };
         });
@@ -152,6 +184,40 @@ class ServicioProceso
             ->whereHas('roles', fn ($query) => $query->where('roles.codigo', 'COMPRAS_ANALISTA')->where('roles.activo', true))
             ->orderBy('name')
             ->pluck('name', 'id');
+    }
+
+    /**
+     * Analistas con su carga actual para elegir al asignar: "Nombre - (N procesos "En revisión") - (M procesos "Para publicar")".
+     * Cuenta los procesos donde el analista tiene la asignacion vigente.
+     *
+     * @return Collection<int, string> id => texto
+     */
+    public function analistasConCarga(): Collection
+    {
+        $analistas = $this->analistasDisponibles();
+
+        $conteos = DB::table('asignaciones_proceso as a')
+            ->join('procesos as p', 'p.id', '=', 'a.proceso_id')
+            ->join('estados_proceso as e', 'e.id', '=', 'p.estado_proceso_id')
+            ->join('roles as r', 'r.id', '=', 'a.rol_id')
+            ->where('a.activo', true)
+            ->where('r.codigo', 'COMPRAS_ANALISTA')
+            ->whereNull('p.deleted_at')
+            ->whereIn('a.user_id', $analistas->keys())
+            ->whereIn('e.codigo', ['EN_REVISION', 'PARA_PUBLICAR'])
+            ->groupBy('a.user_id', 'e.codigo')
+            ->selectRaw('a.user_id, e.codigo, count(distinct p.id) as total')
+            ->get()
+            ->groupBy('user_id');
+
+        return $analistas->map(function (string $nombre, int $id) use ($conteos) {
+            $porEstado = ($conteos->get($id) ?? collect())->pluck('total', 'codigo');
+            $revision = (int) ($porEstado['EN_REVISION'] ?? 0);
+            $publicar = (int) ($porEstado['PARA_PUBLICAR'] ?? 0);
+
+            return "{$nombre} - ({$revision} ".($revision === 1 ? 'proceso' : 'procesos').' "En revisión") - ('
+                .$publicar.' '.($publicar === 1 ? 'proceso' : 'procesos').' "Para publicar")';
+        });
     }
 
     /**

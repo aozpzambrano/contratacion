@@ -70,6 +70,10 @@ class ServicioDocumento
         if ($proceso->esEditable()) {
             return true;
         }
+        // la Comision Tecnica asignada sube documentos mientras el proceso esta en comision (solo "Otros documentos")
+        if ($usuario->tieneRol('COMISION_TECNICA')) {
+            return $proceso->asignaciones()->where('user_id', $usuario->id)->where('activo', true)->exists();
+        }
 
         return $this->esAnalistaAsignado($proceso, $usuario);
     }
@@ -93,12 +97,24 @@ class ServicioDocumento
     {
         $documento->loadMissing(['proceso.estadoProceso', 'estadoDocumento', 'tipoDocumento']);
 
+        if ($this->esOtrosPropio($documento, $usuario)) {
+            return $this->puedeSubir($documento->proceso, $usuario)
+                && in_array($documento->estadoDocumento?->codigo, self::ESTADOS_OTROS_PROPIOS, true);
+        }
+
         return $usuario->activo && $usuario->tienePermiso('documentos.anular')
             && $this->puedeVerProceso($documento->proceso, $usuario)
             && $this->enRevisionTrasDevolucion($documento->proceso)
             && $this->esUnidadDelProceso($usuario)
             && $documento->tipoDocumento->editable_tras_devolucion
             && $documento->estadoDocumento?->codigo === 'APROBADO';
+    }
+
+    /** "Otros documentos" cargado por el propio usuario: puede eliminarlo y subirle versiones nuevas. */
+    private function esOtrosPropio(Documento $documento, User $usuario): bool
+    {
+        return (int) $documento->creado_por === (int) $usuario->id
+            && $documento->tipoDocumento?->codigo === self::TIPO_OTROS;
     }
 
     public function anularDocumento(Documento $documento, User $usuario, string $motivo): void
@@ -137,6 +153,11 @@ class ServicioDocumento
             return false;
         }
 
+        // "Otros documentos": su autor agrega versiones en cualquier etapa en la que pueda subir documentos
+        if ($this->esOtrosPropio($documento, $usuario)) {
+            return $this->puedeSubir($proceso, $usuario) && in_array($estado, self::ESTADOS_OTROS_PROPIOS, true);
+        }
+
         if ($this->enRevisionTrasDevolucion($proceso)) {
             // Solo la unidad, solo los tipos editables y sin cambiar el estado del documento (ya aprobado)
             return $this->esUnidadDelProceso($usuario) && $documento->tipoDocumento->editable_tras_devolucion && $estado === 'APROBADO';
@@ -159,6 +180,25 @@ class ServicioDocumento
 
     /** Tipo "Otros documentos": habilitado en todos los estados salvo Inicio, para quien puede subir documentos. */
     public const TIPO_OTROS = 'OTROS';
+
+    /**
+     * Tipos que solo se cargan desde su boton ("Devolver expediente (sin ofertas)", "Remitir ofertas", "Remitir Informe"):
+     * no aparecen en "Subir documento".
+     */
+    public const TIPOS_SOLO_POR_ACCION = [
+        'INFORME_DEVOLUCION_SIN_OFERTAS', 'NECESIDAD_CONTRATACION_FINALIZADA',
+        'MEMORANDO_SOLICITUD_DESIGNACION_COMISION', 'MEMORANDO_DESIGNACION_COMISION',
+        'MEMORANDO_SOLICITUD_DESIGNACION', 'MEMORANDO_DESIGNACION',
+        'MEMORANDO_REMISION_INFORME', 'INFORME_RECOMENDACION_DEVOLUCION', 'INFORME_SELECCION_PROVEEDOR',
+        'ACTA_RECEPCION_OFERTAS', 'VALIDACION_FIRMAS_INFORME',
+        // certificaciones de la unidad (boton "Remitir certificaciones")
+        'CERTIFICACION_POA', 'PAC', 'CERTIFICACION_PRESUPUESTARIA', 'AUTORIZACION_GASTO',
+        // ocultos hasta definir desde que boton se cargan
+        'ORDEN_COMPRA', 'MEMORANDO_DEVOLUCION', 'PROFORMA',
+    ];
+
+    /** Estados en los que el autor puede eliminar o versionar su propio "Otros documentos". */
+    public const ESTADOS_OTROS_PROPIOS = ['BORRADOR', 'CON_OBSERVACIONES', 'EN_CORRECCION', 'APROBADO'];
 
     /** En el estado Inicio solo se cargan estos dos tipos. */
     public const TIPOS_EN_INICIO = ['INFORME_NECESIDAD', 'ESPECIFICACIONES_TECNICAS'];
@@ -183,7 +223,12 @@ class ServicioDocumento
 
         return TipoDocumento::query()
             ->where('activo', true)
+            ->whereNotIn('codigo', self::TIPOS_SOLO_POR_ACCION)
+            // la Comision Tecnica solo agrega "Otros documentos" (sus informes van por "Remitir Informe")
+            ->when($usuario->tieneRol('COMISION_TECNICA'), fn ($query) => $query->where('codigo', self::TIPO_OTROS))
             ->when($enInicio, fn ($query) => $query->whereIn('codigo', self::TIPOS_EN_INICIO))
+            // en correccion las versiones se cargan desde "Enviar a revision": aqui solo "Otros documentos"
+            ->when($proceso->estadoProceso?->codigo === 'EN_CORRECCION', fn ($query) => $query->where('codigo', self::TIPO_OTROS))
             // tras una devolucion la unidad solo corrige los tipos editables; "Otros documentos" siempre se puede agregar
             ->when($this->enRevisionTrasDevolucion($proceso), fn ($query) => $query->where(
                 fn ($q) => $q->where('editable_tras_devolucion', true)->orWhere('codigo', self::TIPO_OTROS)
@@ -583,6 +628,14 @@ class ServicioDocumento
         return $documentos->count();
     }
 
+    /** La version vigente la subio un analista de Compras: es un cambio pendiente que la unidad debe corregir/revisar. */
+    public function tieneVersionDelAnalista(Documento $documento): bool
+    {
+        $usuario = $documento->versionActual?->user_id ? User::find($documento->versionActual->user_id) : null;
+
+        return $usuario !== null && $usuario->tieneRol('COMPRAS_ANALISTA');
+    }
+
     /** Documentos del proceso que estan en revision (pendientes o en curso) y exigen revision. */
     public function documentosEnRevision(Proceso $proceso): Collection
     {
@@ -608,6 +661,14 @@ class ServicioDocumento
         $documentos = $this->documentosEnRevision($proceso)
             ->when($documentoIds !== null, fn (Collection $c) => $c->whereIn('id', array_map('intval', $documentoIds)));
 
+        // los documentos con una version nueva del analista siempre se remiten a correccion (aunque no se elijan)
+        $forzados = $this->documentosEnRevision($proceso)->filter(fn (Documento $d) => $this->tieneVersionDelAnalista($d));
+        if ($documentoIds !== null) {
+            $documentos = $this->documentosEnRevision($proceso)
+                ->filter(fn (Documento $d) => in_array($d->id, array_map('intval', $documentoIds), true) || $forzados->contains('id', $d->id))
+                ->values();
+        }
+
         if ($documentos->isEmpty()) {
             throw new DomainException('Seleccione al menos un documento en revision para remitir observaciones.');
         }
@@ -628,19 +689,36 @@ class ServicioDocumento
             $this->cerrarAsignaciones($documento, $analista);
         }
 
+        // los documentos que no se observaron quedan "Revisados" (se aprueban al validar la documentacion)
+        $restantes = $this->documentosEnRevision($proceso)->reject(fn (Documento $d) => $documentos->contains('id', $d->id));
+        foreach ($restantes as $documento) {
+            $this->asegurarAsignacion($documento, $analista, 'revisar');
+            $this->iniciarRevision($documento, $analista);
+            $this->registrarRevision($documento, $analista, 'aprobada');
+            DB::select('select aplicar_transicion_documento(?, ?, ?, ?)', [$documento->id, 'marcar_revisado', $analista->id, null]);
+            $this->cerrarAsignaciones($documento, $analista);
+        }
+
         return $documentos->count();
     }
 
     /** Validar documentacion: los documentos en revision quedan APROBADOS (con su revision y aprobacion). */
     public function aprobarDocumentos(Proceso $proceso, User $analista): int
     {
-        $documentos = $this->documentosEnRevision($proceso);
+        $documentos = $this->documentosEnRevision($proceso)->concat(
+            Documento::query()->with('estadoDocumento:id,codigo')->where('proceso_id', $proceso->id)->whereNotNull('version_actual_id')
+                ->whereHas('estadoDocumento', fn ($q) => $q->where('codigo', 'REVISADO'))
+                ->whereHas('tipoDocumento', fn ($q) => $q->where('requiere_revision', true))->orderBy('id')->get()
+        );
 
         foreach ($documentos as $documento) {
             $this->asegurarAsignacion($documento, $analista, 'revisar');
             $this->iniciarRevision($documento, $analista);
 
-            $this->registrarRevision($documento, $analista, 'aprobada');
+            // los "Revisados" ya tienen su revision favorable
+            if ($documento->estadoDocumento->codigo !== 'REVISADO') {
+                $this->registrarRevision($documento, $analista, 'aprobada');
+            }
             DB::table('aprobaciones')->insert([
                 'documento_version_id' => $documento->version_actual_id,
                 'user_id' => $analista->id,

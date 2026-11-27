@@ -1244,7 +1244,11 @@ BEGIN
     SELECT em.fase_id INTO v_fase FROM procesos p JOIN estados_macro em ON em.id = p.estado_macro_id
      WHERE p.id = v_d.proceso_id;
 
-    IF NOT usuario_puede(p_user_id, v_t.permiso_id, v_fase) THEN
+    -- "Otros documentos": quien tiene "Subir documentos" puede eliminar los que cargo el mismo
+    IF NOT usuario_puede(p_user_id, v_t.permiso_id, v_fase)
+       AND NOT (p_codigo = 'anular' AND v_d.creado_por = p_user_id
+                AND (SELECT codigo FROM tipos_documento WHERE id = v_d.tipo_documento_id) = 'OTROS'
+                AND usuario_puede(p_user_id, (SELECT id FROM permisos WHERE codigo = 'documentos.subir'), v_fase)) THEN
         RAISE EXCEPTION 'El usuario no tiene el permiso % en esta fase', v_perm.codigo
             USING ERRCODE = 'insufficient_privilege';
     END IF;
@@ -1388,6 +1392,8 @@ INSERT INTO permisos (codigo, nombre, modulo, requiere_asignacion) VALUES
  ('procesos.remitir_informe','Remitir informe de la comision tecnica','procesos',true),
  ('procesos.reabrir','Reabrir proceso','procesos',true),
  ('procesos.cerrar','Cerrar proceso','procesos',true),
+ ('procesos.reabrir_unidad','Reabrir proceso (unidad requirente)','procesos',true),
+ ('procesos.cerrar_sin_reapertura','Cerrar proceso sin reapertura (unidad requirente)','procesos',true),
  ('documentos.ver','Ver documentos','documentos',false),
  ('documentos.subir','Subir documentos','documentos',false),
  ('documentos.descargar','Descargar documentos','documentos',false),
@@ -1435,7 +1441,7 @@ SELECT DISTINCT r.id, p.id
     ('UNIDAD_REQUIRENTE','procesos.editar'),('UNIDAD_REQUIRENTE','procesos.enviar_a_revision'),
     ('UNIDAD_REQUIRENTE','documentos.ver'),('UNIDAD_REQUIRENTE','documentos.subir'),
     ('UNIDAD_REQUIRENTE','documentos.descargar'),('UNIDAD_REQUIRENTE','documentos.corregir'),
-    ('UNIDAD_REQUIRENTE','documentos.legalizar'),('UNIDAD_REQUIRENTE','documentos.anular'),('UNIDAD_REQUIRENTE','procesos.remitir_legalizados'),('UNIDAD_REQUIRENTE','expedientes.descargar'),('UNIDAD_REQUIRENTE','publicaciones.ver'),
+    ('UNIDAD_REQUIRENTE','documentos.legalizar'),('UNIDAD_REQUIRENTE','documentos.anular'),('UNIDAD_REQUIRENTE','procesos.remitir_legalizados'),('UNIDAD_REQUIRENTE','procesos.reabrir_unidad'),('UNIDAD_REQUIRENTE','procesos.cerrar_sin_reapertura'),('UNIDAD_REQUIRENTE','expedientes.descargar'),('UNIDAD_REQUIRENTE','publicaciones.ver'),
     ('UNIDAD_REQUIRENTE','proveedores.ver'),('UNIDAD_REQUIRENTE','ofertas.ver'),
     ('UNIDAD_REQUIRENTE','reportes.ver'),
     ('COMPRAS_JEFE','%.ver'),('COMPRAS_JEFE','procesos.asignar_responsables'),
@@ -1495,14 +1501,15 @@ INSERT INTO estados_proceso (codigo, nombre, orden, es_inicial, es_final) VALUES
  ('PARA_PUBLICAR','Para publicar',7,false,false),
  ('PUBLICADO','Publicado',8,false,false),
  ('EN_COMISION','En comision tecnica',10,false,false),
- ('APROBADO','Aprobado',11,false,false),
- ('GENERACION_EXPEDIENTE','Generacion de Expediente',12,false,false),
- ('GENERACION_ORDEN_COMPRA','Generacion de Orden de Compra',13,false,false),
- ('ADMINISTRACION_CONTRATO','Administracion de Contrato',14,false,false),
- ('CIERRE','Cierre',15,false,true),
- ('PARA_REAPERTURA','Para reapertura',16,false,false),
+ ('PARA_CERTIFICACIONES','Para certificaciones',11,false,false),
+ ('APROBADO','Aprobado',12,false,false),
+ ('GENERACION_EXPEDIENTE','Generacion de Expediente',13,false,false),
+ ('GENERACION_ORDEN_COMPRA','Generacion de Orden de Compra',14,false,false),
+ ('ADMINISTRACION_CONTRATO','Administracion de Contrato',15,false,false),
+ ('CIERRE','Cierre',16,false,true),
+ ('PARA_REAPERTURA','Para reapertura',17,false,false),
  -- Misma funcion que PARA_LEGALIZAR (la unidad remite memorando, horas y publicaciones) pero para un ciclo nuevo
- ('PARA_REPUBLICAR','Para Re-publicar',17,false,false);
+ ('PARA_REPUBLICAR','Para Re-publicar',18,false,false);
 UPDATE estados_proceso SET permite_asignar_codigo = true WHERE codigo = 'PARA_PUBLICAR';
 
 INSERT INTO estados_documento (codigo, nombre, orden, grupo, es_inicial, es_final) VALUES
@@ -1511,9 +1518,10 @@ INSERT INTO estados_documento (codigo, nombre, orden, grupo, es_inicial, es_fina
  ('EN_REVISION','En revision',3,'pendiente',false,false),
  ('CON_OBSERVACIONES','Con observaciones',4,'en_correccion',false,false),
  ('EN_CORRECCION','En correccion',5,'en_correccion',false,false),
- ('APROBADO','Aprobado',6,'aprobado',false,false),
- ('LEGALIZADO','Legalizado',7,'aprobado',false,true),
- ('ANULADO','Anulado',8,'anulado',false,true);
+ ('REVISADO','Revisado',6,'pendiente',false,false),
+ ('APROBADO','Aprobado',7,'aprobado',false,false),
+ ('LEGALIZADO','Legalizado',8,'aprobado',false,true),
+ ('ANULADO','Anulado',9,'anulado',false,true);
 
 INSERT INTO estados_oferta (codigo, nombre, orden, resultado, es_inicial, es_final) VALUES
  ('RECIBIDA','Recibida',1,'en_curso',true,false),
@@ -1620,9 +1628,9 @@ SELECT m.codigo, m.nombre, f.id, e.id, rg.id, rr.id, m.rev, m.apr, m.leg
   FROM (VALUES
     ('INFORME_NECESIDAD','Informe de necesidad','PREPARATORIA','ELABORACION_EXPEDIENTE','UNIDAD_REQUIRENTE','COMPRAS_ANALISTA',true,true,true),
     ('ESPECIFICACIONES_TECNICAS','Especificaciones tecnicas','PREPARATORIA','ELABORACION_EXPEDIENTE','UNIDAD_REQUIRENTE','COMPRAS_ANALISTA',true,true,true),
-    ('PAC','Plan Anual de Contratacion (PAC)','PREPARATORIA','DOCUMENTACION_COMPLEMENTARIA','UNIDAD_REQUIRENTE','COMPRAS_ANALISTA',true,true,false),
-    ('CERTIFICACION_PRESUPUESTARIA','Certificacion presupuestaria','PREPARATORIA','DOCUMENTACION_COMPLEMENTARIA','UNIDAD_REQUIRENTE','COMPRAS_ANALISTA',true,true,false),
-    ('AUTORIZACION_GASTO','Autorizacion de gasto','PREPARATORIA','DOCUMENTACION_COMPLEMENTARIA','UNIDAD_REQUIRENTE','COMPRAS_ANALISTA',true,true,false),
+    ('PAC','Certificacion PAC','PREPARATORIA','DOCUMENTACION_COMPLEMENTARIA','UNIDAD_REQUIRENTE',NULL,false,false,false),
+    ('CERTIFICACION_PRESUPUESTARIA','Certificacion presupuestaria','PREPARATORIA','DOCUMENTACION_COMPLEMENTARIA','UNIDAD_REQUIRENTE',NULL,false,false,false),
+    ('AUTORIZACION_GASTO','Autorizacion de gasto','PREPARATORIA','DOCUMENTACION_COMPLEMENTARIA','UNIDAD_REQUIRENTE',NULL,false,false,false),
     ('DOCUMENTACION_COMPLEMENTARIA','Documentacion complementaria','PREPARATORIA','DOCUMENTACION_COMPLEMENTARIA','UNIDAD_REQUIRENTE','COMPRAS_ANALISTA',true,true,false),
     ('MEMORANDO_SOLICITUD_PUBLICACION','Memorando de solicitud de publicacion','PREPARATORIA',NULL,'UNIDAD_REQUIRENTE',NULL,false,false,false),
     ('FICHAS_TECNICAS','Fichas tecnicas','PREPARATORIA','DOCUMENTACION_COMPLEMENTARIA','UNIDAD_REQUIRENTE',NULL,false,false,false),
@@ -1658,11 +1666,11 @@ SELECT m.codigo, m.nombre, f.id, e.id, rg.id, rr.id, m.rev, m.apr, m.leg
 
 -- El memorando de solicitud de publicacion es solo PDF y hay uno por cada solicitud (ronda de publicacion).
 UPDATE tipos_documento SET extensiones_permitidas = 'pdf'
- WHERE codigo IN ('MEMORANDO_SOLICITUD_PUBLICACION','FICHAS_TECNICAS','CERTIFICADO_NO_CATALOGADO','VALIDACION_FIRMAS_ELECTRONICAS','AUTORIZACION_REQUERIMIENTO','ESTUDIO_MERCADO','CERTIFICACION_POA','MEMORANDO_DEVOLUCION','INFORME_DEVOLUCION_SIN_OFERTAS','NECESIDAD_CONTRATACION_FINALIZADA','MEMORANDO_SOLICITUD_DESIGNACION_COMISION','MEMORANDO_DESIGNACION_COMISION','MEMORANDO_REMISION_INFORME','INFORME_RECOMENDACION_DEVOLUCION','INFORME_SELECCION_PROVEEDOR','ACTA_RECEPCION_OFERTAS','VALIDACION_FIRMAS_INFORME');
+ WHERE codigo IN ('MEMORANDO_SOLICITUD_PUBLICACION','FICHAS_TECNICAS','CERTIFICADO_NO_CATALOGADO','VALIDACION_FIRMAS_ELECTRONICAS','AUTORIZACION_REQUERIMIENTO','ESTUDIO_MERCADO','CERTIFICACION_POA','MEMORANDO_DEVOLUCION','INFORME_DEVOLUCION_SIN_OFERTAS','NECESIDAD_CONTRATACION_FINALIZADA','MEMORANDO_SOLICITUD_DESIGNACION_COMISION','MEMORANDO_DESIGNACION_COMISION','MEMORANDO_REMISION_INFORME','INFORME_RECOMENDACION_DEVOLUCION','INFORME_SELECCION_PROVEEDOR','ACTA_RECEPCION_OFERTAS','VALIDACION_FIRMAS_INFORME','PAC','CERTIFICACION_PRESUPUESTARIA','AUTORIZACION_GASTO');
 -- Tipos que admiten varios documentos por proceso
 UPDATE tipos_documento SET editable_tras_devolucion = true WHERE codigo IN ('DISTRIBUTIVO','FICHAS_TECNICAS','CERTIFICADO_NO_CATALOGADO','VALIDACION_FIRMAS_ELECTRONICAS','AUTORIZACION_REQUERIMIENTO');
 UPDATE tipos_documento SET permite_multiples = true
- WHERE codigo IN ('MEMORANDO_SOLICITUD_PUBLICACION','FICHAS_TECNICAS','CERTIFICADO_NO_CATALOGADO','VALIDACION_FIRMAS_ELECTRONICAS','AUTORIZACION_REQUERIMIENTO','DOCUMENTACION_COMPLEMENTARIA','PROFORMA','SOLICITUD_PAGO','OTROS','MEMORANDO_DEVOLUCION','INFORME_DEVOLUCION_SIN_OFERTAS','DISTRIBUTIVO','NECESIDAD_CONTRATACION_FINALIZADA','MEMORANDO_SOLICITUD_DESIGNACION_COMISION','MEMORANDO_DESIGNACION_COMISION','MEMORANDO_REMISION_INFORME','INFORME_RECOMENDACION_DEVOLUCION','INFORME_SELECCION_PROVEEDOR','ACTA_RECEPCION_OFERTAS','VALIDACION_FIRMAS_INFORME');
+ WHERE codigo IN ('MEMORANDO_SOLICITUD_PUBLICACION','FICHAS_TECNICAS','CERTIFICADO_NO_CATALOGADO','VALIDACION_FIRMAS_ELECTRONICAS','AUTORIZACION_REQUERIMIENTO','DOCUMENTACION_COMPLEMENTARIA','PROFORMA','SOLICITUD_PAGO','OTROS','MEMORANDO_DEVOLUCION','INFORME_DEVOLUCION_SIN_OFERTAS','DISTRIBUTIVO','NECESIDAD_CONTRATACION_FINALIZADA','MEMORANDO_SOLICITUD_DESIGNACION_COMISION','MEMORANDO_DESIGNACION_COMISION','MEMORANDO_REMISION_INFORME','INFORME_RECOMENDACION_DEVOLUCION','INFORME_SELECCION_PROVEEDOR','ACTA_RECEPCION_OFERTAS','VALIDACION_FIRMAS_INFORME','CERTIFICACION_POA','PAC','CERTIFICACION_PRESUPUESTARIA','AUTORIZACION_GASTO');
 
 -- Transiciones de proceso
 INSERT INTO transiciones_proceso
@@ -1693,14 +1701,20 @@ SELECT eo.id, ed.id, m.codigo, m.nombre, em.id, p.id, m.coment, m.reglas::jsonb
     ('PUBLICADO','PARA_REAPERTURA','devolver_expediente','Devolver expediente',NULL,'procesos.devolver',true,'{"decision_ofertas": "devolver", "requiere_devolucion_registrada": true}'),
     -- La fase Precontractual inicia con la designacion y convocatoria de la Comision Tecnica
     -- La Comision Tecnica remite su informe: recomendacion de devolucion o de seleccion de proveedor
-    ('EN_COMISION','PARA_REAPERTURA','remitir_informe_devolucion','Remitir informe de devolucion',NULL,'procesos.remitir_informe',false,'{"requiere_devolucion_registrada": true}'),
-    ('EN_COMISION','APROBADO','remitir_informe_seleccion','Remitir informe de seleccion de proveedor',NULL,'procesos.remitir_informe',false,'{}'),
+    -- Devolucion recomendada por la comision: el expediente vuelve a la unidad requirente y a la fase Preparatoria
+    ('EN_COMISION','PARA_REAPERTURA','remitir_informe_devolucion','Remitir informe de devolucion','PREPARATORIA','procesos.remitir_informe',false,'{"requiere_devolucion_registrada": true}'),
+    ('EN_COMISION','PARA_CERTIFICACIONES','remitir_informe_seleccion','Remitir informe de seleccion de proveedor',NULL,'procesos.remitir_informe',false,'{}'),
+    -- La unidad registra Certificacion POA, Certificacion PAC, Certificacion presupuestaria y Autorizacion de gasto (PDF legalizados)
+    ('PARA_CERTIFICACIONES','APROBADO','remitir_certificaciones','Remitir certificaciones',NULL,'procesos.remitir_legalizados',false,'{}'),
     ('APROBADO','GENERACION_EXPEDIENTE','generar_expediente','Generar expediente',NULL,'procesos.autorizar_transicion',false,'{}'),
     ('GENERACION_EXPEDIENTE','GENERACION_ORDEN_COMPRA','generar_orden_compra','Generar orden de compra',NULL,'ordenes_compra.registrar',false,'{}'),
     ('GENERACION_ORDEN_COMPRA','ADMINISTRACION_CONTRATO','iniciar_administracion','Iniciar administracion contractual','CONTRACTUAL','ordenes_compra.registrar',false,'{"requiere_orden_compra": true}'),
     ('ADMINISTRACION_CONTRATO','CIERRE','cerrar','Cerrar','FINALIZADO','procesos.cerrar',false,'{}'),
     ('PARA_REAPERTURA','PARA_REPUBLICAR','reabrir','Reabrir proceso','PREPARATORIA','procesos.reabrir',true,'{"devolucion_permite_reapertura": true, "incrementa_ciclo": true}'),
-    ('PARA_REAPERTURA','CIERRE','cerrar_sin_reapertura','Cerrar sin reapertura','FINALIZADO','procesos.cerrar',true,'{}')
+    -- Con "Para reapertura" el proceso esta en la unidad requirente: ella reabre (nuevo ciclo, mismo flujo que el ciclo 1) o cierra.
+    -- "reabrir" (analista) solo lo usa internamente la devolucion sin ofertas.
+    ('PARA_REAPERTURA','PARA_REPUBLICAR','reabrir_unidad','Reabrir proceso','PREPARATORIA','procesos.reabrir_unidad',false,'{"devolucion_permite_reapertura": true, "incrementa_ciclo": true}'),
+    ('PARA_REAPERTURA','CIERRE','cerrar_sin_reapertura','Cerrar sin reapertura','FINALIZADO','procesos.cerrar_sin_reapertura',true,'{}')
   ) AS m(origen, destino, codigo, nombre, macro, permiso, coment, reglas)
   LEFT JOIN estados_proceso eo ON eo.codigo = m.origen
   JOIN estados_proceso ed      ON ed.codigo = m.destino
@@ -1736,6 +1750,14 @@ SELECT t.id, td.id, (SELECT id FROM estados_documento WHERE codigo = 'LEGALIZADO
  WHERE t.codigo = 'remitir_ofertas'
    AND td.codigo IN ('NECESIDAD_CONTRATACION_FINALIZADA','MEMORANDO_SOLICITUD_DESIGNACION_COMISION','MEMORANDO_DESIGNACION_COMISION');
 
+-- Certificaciones de la unidad tras el informe de seleccion (PDF legalizados)
+INSERT INTO transicion_proceso_requisitos (transicion_id, tipo_documento_id, estado_documento_minimo_id)
+SELECT t.id, td.id, (SELECT id FROM estados_documento WHERE codigo = 'LEGALIZADO')
+  FROM transiciones_proceso t
+  CROSS JOIN tipos_documento td
+ WHERE t.codigo = 'remitir_certificaciones'
+   AND td.codigo IN ('CERTIFICACION_POA','PAC','CERTIFICACION_PRESUPUESTARIA','AUTORIZACION_GASTO');
+
 -- Informes de la Comision Tecnica (PDF legalizados, uno por documento)
 INSERT INTO transicion_proceso_requisitos (transicion_id, tipo_documento_id, estado_documento_minimo_id)
 SELECT t.id, td.id, (SELECT id FROM estados_documento WHERE codigo = 'LEGALIZADO')
@@ -1765,6 +1787,10 @@ SELECT eo.id, ed.id, m.codigo, m.nombre, p.id, m.coment, m.reglas::jsonb
     ('CON_OBSERVACIONES','EN_CORRECCION','iniciar_correccion','Iniciar correccion','documentos.corregir',false,'{}'),
     ('EN_CORRECCION','PENDIENTE_REVISION','reenviar','Reenviar corregido','documentos.corregir',false,'{"requiere_version": true}'),
     ('EN_REVISION','APROBADO','aprobar','Aprobar','documentos.aprobar',false,'{}'),
+    -- Al remitir observaciones, los documentos no observados quedan "Revisados" (se aprueban al validar la documentacion)
+    ('EN_REVISION','REVISADO','marcar_revisado','Marcar como revisado','documentos.solicitar_correccion',false,'{}'),
+    ('REVISADO','APROBADO','aprobar','Aprobar','documentos.aprobar',false,'{}'),
+    ('REVISADO','ANULADO','anular','Anular','documentos.anular',true,'{}'),
     ('APROBADO','LEGALIZADO','legalizar','Legalizar','documentos.legalizar',false,'{}'),
     ('LEGALIZADO','APROBADO','devolver_legalizacion','Devolver legalizacion','documentos.devolver_legalizacion',false,'{}'),
     -- Documentos que Compras sube ya firmados (memorando e informe de devolucion): no pasan por la legalizacion de la unidad

@@ -64,7 +64,9 @@ class DocumentosRelationManager extends RelationManager
                 Action::make('subir')
                     ->label('Subir documento')
                     ->icon('heroicon-o-arrow-up-tray')
-                    ->visible(fn () => $servicio->tiposDisponibles($this->getOwnerRecord(), auth()->user())->isNotEmpty())
+                    // en Inicio los documentos se cargan desde "Enviar a revision"
+                    ->visible(fn () => $this->getOwnerRecord()->estadoProceso?->codigo !== 'INICIO'
+                        && $servicio->tiposDisponibles($this->getOwnerRecord(), auth()->user())->isNotEmpty())
                     ->modalHeading('Subir documento')
                     ->schema([
                         Select::make('tipo_documento_id')
@@ -128,6 +130,22 @@ class DocumentosRelationManager extends RelationManager
 
                         return app(ServicioDocumentoFijo::class)->entregar($ruta, $nombre, true);
                     }),
+                Action::make('generar_fase_preparatoria')
+                    ->label('Fase Preparatoria')
+                    ->icon('heroicon-o-archive-box-arrow-down')
+                    ->color('gray')
+                    ->visible(fn () => app(ServicioExpedientePublicacion::class)->puedeGenerarFasePreparatoria($this->getOwnerRecord(), auth()->user()))
+                    ->action(function () {
+                        try {
+                            [$ruta, $nombre] = app(ServicioExpedientePublicacion::class)->generarFasePreparatoria($this->getOwnerRecord(), auth()->user());
+                        } catch (DomainException $e) {
+                            Notification::make()->title('No se pudo generar el expediente')->body($e->getMessage())->danger()->send();
+
+                            return null;
+                        }
+
+                        return app(ServicioDocumentoFijo::class)->entregar($ruta, $nombre, true);
+                    }),
             ])
             ->recordActions([
                 Action::make('versiones')
@@ -168,7 +186,10 @@ class DocumentosRelationManager extends RelationManager
                     ->label(fn () => $servicio->esAnalistaAsignado($this->getOwnerRecord(), auth()->user()) ? 'Subir documento' : 'Nueva versión')
                     ->icon('heroicon-o-document-plus')
                     ->color('warning')
-                    ->visible(fn (Documento $record) => $servicio->puedeAgregarVersion($record, auth()->user()))
+                    // la unidad carga y corrige sus documentos desde "Enviar a revision" / "Reenviar" (salvo "Otros documentos")
+                    ->visible(fn (Documento $record) => $servicio->puedeAgregarVersion($record, auth()->user())
+                        && ! (auth()->user()->tieneRol('UNIDAD_REQUIRENTE') && $record->tipoDocumento->requiere_revision
+                            && $record->tipoDocumento->codigo !== ServicioDocumento::TIPO_OTROS && $record->proceso->esEditable()))
                     ->schema(fn (Documento $record) => [
                         $this->campoArchivo()
                             ->label($this->etiquetaArchivo($record->tipoDocumento))

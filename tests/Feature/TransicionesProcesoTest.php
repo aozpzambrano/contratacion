@@ -124,6 +124,27 @@ class TransicionesProcesoTest extends TestCase
         $this->assertSame(0, Proceso::visiblesPara($ana2)->count());
     }
 
+    public function test_al_asignar_se_muestra_la_carga_de_cada_analista(): void
+    {
+        $jefe = User::factory()->conRoles('COMPRAS_JEFE')->create();
+        $unidad = User::factory()->conRoles('UNIDAD_REQUIRENTE')->create();
+        $ana1 = User::factory()->conRoles('COMPRAS_ANALISTA')->create(['name' => 'Ana Uno']);
+        $ana2 = User::factory()->conRoles('COMPRAS_ANALISTA')->create(['name' => 'Beto Dos']);
+
+        $esperado = fn (int $revision, int $publicar) => [
+            $ana1->id => 'Ana Uno - ('.$revision.' '.($revision === 1 ? 'proceso' : 'procesos').' "En revisión") - ('.$publicar.' procesos "Para publicar")',
+            $ana2->id => 'Beto Dos - (0 procesos "En revisión") - (0 procesos "Para publicar")',
+        ];
+
+        $this->assertSame($esperado(0, 0), $this->servicio->analistasConCarga()->only([$ana1->id, $ana2->id])->all());
+
+        $p = $this->procesoListoParaEnviar($unidad);
+        $this->servicio->aplicarTransicion($p, $this->transicion('enviar_a_revision'), $unidad);
+        $this->servicio->asignarAnalista($p->fresh(), $ana1, $jefe);
+
+        $this->assertSame($esperado(1, 0), $this->servicio->analistasConCarga()->only([$ana1->id, $ana2->id])->all());
+    }
+
     public function test_asignar_analista_solo_despues_de_enviar_a_revision(): void
     {
         $jefe = User::factory()->conRoles('COMPRAS_JEFE')->create();

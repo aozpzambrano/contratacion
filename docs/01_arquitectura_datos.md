@@ -662,3 +662,49 @@ El botón **Remitir ofertas** (Publicado → Para documentación) abre un formul
   - Los requisitos están en `transicion_proceso_requisitos`. Al terminar, el usuario de la comisión sigue activo y asignado, pero en solo lectura: ya no remite informes ni carga documentos.
 - Tipos de documento nuevos: `MEMORANDO_REMISION_INFORME`, `ACTA_RECEPCION_OFERTAS`, `VALIDACION_FIRMAS_INFORME`; los dos informes dejan de requerir revisión.
 
+## 32. «Subir documento»: tipos por botón y «Otros documentos» (Entrega E5n)
+
+- **Tipos que solo se cargan desde su botón** (no salen en *Subir documento*): Informe de devolución por falta de ofertas, Necesidad de contratación finalizada, Memorando de solicitud de la designación de la comisión, Memorando de designación de la comisión (y los memorandos de designación anteriores), los documentos del informe de la comisión y, hasta definir su botón, Orden de compra, Memorando de devolución de expediente y Proforma. Lista en `ServicioDocumento::TIPOS_SOLO_POR_ACCION`; se aplica en todos los estados.
+- **Comisión Técnica:** ve el botón *Subir documento* mientras el proceso está en comisión y solo con el tipo *Otros documentos*.
+- **Otros documentos:** quien puede subir documentos puede *Eliminar* y *Nueva versión* únicamente de los que él mismo cargó (la BD, en `aplicar_transicion_documento`, lo permite para `anular` solo si `creado_por` es el usuario, el tipo es `OTROS` y tiene `documentos.subir`). Siguen entrando al expediente y marcados por defecto.
+
+
+## 33. Certificaciones de la unidad requirente (Entrega E5q)
+
+- Tras `remitir_informe_seleccion` el proceso queda en el estado **Para certificaciones** (`PARA_CERTIFICACIONES`, orden 11).
+- La Unidad Requirente usa el botón **Remitir certificaciones**: cuatro PDF legalizados obligatorios (Certificación POA, Certificación PAC, Certificación Presupuestaria, Autorización de Gasto). La transición `remitir_certificaciones` (→ `APROBADO`) exige en BD los cuatro documentos en LEGALIZADO.
+- Los cuatro tipos son de la unidad, sin revisión, solo PDF, y no aparecen en «Subir documento» (`TIPOS_SOLO_POR_ACCION`).
+- Servicio: `ServicioRemisionCertificaciones`; auditoría `proceso.certificaciones_remitidas`.
+
+## 34. Zip «Fase Preparatoria» para Compras (Entrega E5r)
+
+- Botón **Fase Preparatoria** en Documentos para Jefe/Analista de Compras, visible cuando el proceso ya salió de la fase Preparatoria (p. ej. Precontractual tras «Remitir ofertas»).
+- Genera `FasePreparatoria-<código>.zip` con los documentos de esa fase en las mismas carpetas del expediente (01 Informe de necesidad … 07 Autorización del requerimiento), el memorando de solicitud de publicación, los documentos fijos (Anexo de vinculaciones, Anexo I, Proyecto de orden de compra, Reglamento interno) y los «Otros documentos» que no sean de la Comisión Técnica. No incluye documentos de la comisión ni de fases posteriores.
+- Servicio: `ServicioExpedientePublicacion::generarFasePreparatoria`; auditoría `expediente.fase_preparatoria_generado`. No requiere migración.
+
+## 35. «Enviar a revisión» con carga de documentos (Entrega E5s)
+
+- En **Inicio**, «Subir documento» ya no aparece: la unidad requirente carga el Informe de necesidad y las Especificaciones técnicas en el formulario de **Enviar a revisión** (los dos obligatorios en el primer envío; si ya hay uno cargado de antes, solo se reemplaza al adjuntar otro archivo).
+- En **En corrección**, el botón **Enviar a revisión** (`reenviar_a_revision`) pide una versión nueva de cada documento observado. La acción «Nueva versión» deja de mostrarse a la unidad para documentos sujetos a revisión (sigue para «Otros documentos»).
+- Servicio: `ServicioEnvioRevision` (documentos + transición en una transacción; si falta algo no se crea nada y se limpian los temporales). Sin cambios de esquema.
+
+## 36. Estado de documento «Revisado» (Entrega E5v)
+
+- Nuevo estado `REVISADO` (orden 6; Aprobado, Legalizado y Anulado pasan a 7, 8 y 9). Transiciones: `EN_REVISION → REVISADO` (`marcar_revisado`), `REVISADO → APROBADO` (`aprobar`), `REVISADO → ANULADO`.
+- Al **Remitir observaciones**, los documentos en revisión que no se observan quedan **Revisados** (con su revisión favorable) en lugar de seguir «Pendiente de revisión». Al reenviar la unidad solo los observados vuelven a revisión; al **Validar documentación** los Revisados pasan a Aprobado junto con los demás.
+- «Nueva versión» del analista: solo mientras el documento está Pendiente de revisión o En revisión. En Revisado o con observaciones no se muestra (el revisado ya está conforme; el observado lo corrige la unidad desde «Enviar a revisión»).
+- Requiere `migrate:fresh --seed` (cambia el catálogo de estados).
+
+## 37. Informe de devolución de la comisión vuelve a la unidad (Entrega E5w)
+
+- `remitir_informe_devolucion` (EN_COMISION → PARA_REAPERTURA) cambia además la fase del proceso de **Precontractual** a **Preparatoria**: el expediente vuelve a la Unidad Requirente y el estado se mantiene en «Para reapertura».
+- La Comisión Técnica sigue activa y asignada en solo lectura (la visibilidad depende de la asignación, no de la fase).
+- Requiere `migrate:fresh --seed` (cambia la transición en el esquema SQL).
+
+## 38. Reapertura por la unidad, retiro del analista, certificaciones múltiples y ofertas sin imágenes (Entrega E5x)
+
+- **Retiro del analista:** al «Validar documentación» (→ Para legalizar) se cierra la asignación del analista; deja de ver el proceso. El Jefe asigna analista de nuevo cuando está Legalizado (se genera el número y continúa).
+- **Ofertas:** ya no admiten imágenes (`jpg`, `jpeg`, `png`); quedan PDF, Word, Excel y ZIP.
+- **Remitir certificaciones:** cada documento (POA, PAC, Presupuestaria, Autorización de gasto) admite varios PDF; al menos uno por documento.
+- **Para reapertura → unidad requirente:** nueva transición `reabrir_unidad` (permiso `procesos.reabrir_unidad`) y `cerrar_sin_reapertura` pasa al permiso `procesos.cerrar_sin_reapertura` (ambos de la unidad). «Reabrir proceso» abre un nuevo ciclo repitiendo el flujo del ciclo 1: memorando de solicitud de publicación (PDF, queda en Documentos), número del memorando, número de publicaciones y horas; la solicitud del ciclo anterior queda «devuelta» (historial) y el proceso pasa a Legalizado, donde el Jefe asigna al analista. «Cerrar sin reapertura» exige comentario y deja el proceso solo de lectura. `reabrir` (analista) queda solo para la devolución sin ofertas.
+- Requiere `migrate:fresh --seed`.

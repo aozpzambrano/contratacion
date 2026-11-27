@@ -389,6 +389,9 @@ class OfertasTest extends TestCase
         ]);
 
         $this->assertSame('PARA_REAPERTURA', $this->proceso->fresh()->estadoProceso->codigo);
+        // vuelve a la unidad requirente: la fase pasa de Precontractual a Preparatoria
+        $this->assertSame('PREPARATORIA', $this->proceso->fresh()->estadoMacro->codigo);
+        $this->assertTrue(app(\App\Services\ServicioDocumento::class)->puedeVerProceso($proceso->fresh(), $this->unidad));
         $estados = DB::table('documentos as d')->join('estados_documento as e', 'e.id', '=', 'd.estado_documento_id')
             ->whereIn('d.tipo_documento_id', $tipos)->where('d.proceso_id', $proceso->id)->pluck('e.codigo');
         $this->assertCount(2, $estados);
@@ -426,12 +429,137 @@ class OfertasTest extends TestCase
 
         $informes->remitir($proceso, $comision, ServicioInformeComision::SELECCION, $completo());
 
-        $this->assertSame('APROBADO', $this->proceso->fresh()->estadoProceso->codigo);
+        $this->assertSame('PARA_CERTIFICACIONES', $this->proceso->fresh()->estadoProceso->codigo);
         $this->assertSame(4, DB::table('documentos as d')->join('estados_documento as e', 'e.id', '=', 'd.estado_documento_id')
             ->join('tipos_documento as t', 't.id', '=', 'd.tipo_documento_id')
             ->whereIn('t.codigo', ['MEMORANDO_REMISION_INFORME', 'INFORME_SELECCION_PROVEEDOR', 'ACTA_RECEPCION_OFERTAS', 'VALIDACION_FIRMAS_INFORME'])
             ->where('d.proceso_id', $proceso->id)->where('e.codigo', 'LEGALIZADO')->count());
         $this->assertSame(0, DB::table('devoluciones')->where('proceso_id', $proceso->id)->count());
+    }
+
+    public function test_la_unidad_remite_las_cuatro_certificaciones_y_el_proceso_queda_aprobado(): void
+    {
+        [$proceso, $comision] = $this->procesoEnComision();
+        app(ServicioInformeComision::class)->remitir($proceso, $comision, ServicioInformeComision::SELECCION, collect(['memorando', 'informe', 'acta', 'firmas'])
+            ->mapWithKeys(fn ($c) => [$c => $this->pdfTemporal($c.'.pdf')])->all());
+        $proceso = $proceso->fresh();
+        $this->assertSame('PARA_CERTIFICACIONES', $proceso->estadoProceso->codigo);
+
+        $certs = app(\App\Services\ServicioRemisionCertificaciones::class);
+        $this->assertTrue($certs->puedeRemitir($proceso, $this->unidad));
+        $this->assertFalse($certs->puedeRemitir($proceso, $this->analista));
+        $this->assertFalse($certs->puedeRemitir($proceso, $comision->fresh()));
+        // no se cargan desde "Subir documento"
+        $codigos = app(ServicioDocumento::class)->tiposDisponibles($proceso, $this->unidad)->pluck('codigo')->all();
+        $this->assertSame([], array_intersect($codigos, ['CERTIFICACION_POA', 'PAC', 'CERTIFICACION_PRESUPUESTARIA', 'AUTORIZACION_GASTO']));
+
+        $campos = array_keys(\App\Services\ServicioRemisionCertificaciones::DOCUMENTOS);
+        foreach ($campos as $falta) {
+            $archivos = [];
+            foreach ($campos as $c) {
+                $archivos[$c] = $c === $falta ? [] : $this->pdfTemporal($c.'.pdf');
+            }
+            try {
+                $certs->remitir($proceso, $this->unidad, $archivos);
+                $this->fail("Debio exigir: {$falta}");
+            } catch (DomainException $e) {
+                $this->assertStringContainsString('Cargue', $e->getMessage(), $falta);
+            }
+            $this->assertSame('PARA_CERTIFICACIONES', $this->proceso->fresh()->estadoProceso->codigo, $falta);
+            $this->assertSame([], Storage::disk(ServicioDocumento::DISCO)->allFiles('temporal'), "sin temporales ({$falta})");
+        }
+
+        $certs->remitir($proceso, $this->unidad, collect($campos)->mapWithKeys(fn ($c) => [$c => $this->pdfTemporal($c.'.pdf')])->all());
+
+        $this->assertSame('APROBADO', $this->proceso->fresh()->estadoProceso->codigo);
+        $this->assertSame(4, DB::table('documentos as d')->join('estados_documento as e', 'e.id', '=', 'd.estado_documento_id')
+            ->join('tipos_documento as t', 't.id', '=', 'd.tipo_documento_id')
+            ->whereIn('t.codigo', ['CERTIFICACION_POA', 'PAC', 'CERTIFICACION_PRESUPUESTARIA', 'AUTORIZACION_GASTO'])
+            ->where('d.proceso_id', $proceso->id)->where('e.codigo', 'LEGALIZADO')->count());
+    }
+
+    public function test_la_oferta_ya_no_admite_imagenes(): void
+    {
+        $this->assertSame(['pdf', 'doc', 'docx', 'xls', 'xlsx', 'zip'], ServicioOferta::EXTENSIONES_OFERTA);
+    }
+
+    public function test_certificaciones_admiten_varios_pdf_por_documento(): void
+    {
+        [$proceso, $comision] = $this->procesoEnComision();
+        app(ServicioInformeComision::class)->remitir($proceso, $comision, ServicioInformeComision::SELECCION, collect(['memorando', 'informe', 'acta', 'firmas'])
+            ->mapWithKeys(fn ($c) => [$c => $this->pdfTemporal($c.'.pdf')])->all());
+
+        app(\App\Services\ServicioRemisionCertificaciones::class)->remitir($this->proceso->fresh(), $this->unidad, [
+            'poa' => [$this->pdfTemporal('poa1.pdf'), $this->pdfTemporal('poa2.pdf')],
+            'pac' => [$this->pdfTemporal('pac.pdf')],
+            'presupuestaria' => [$this->pdfTemporal('presupuesto1.pdf'), $this->pdfTemporal('presupuesto2.pdf'), $this->pdfTemporal('presupuesto3.pdf')],
+            'gasto' => [$this->pdfTemporal('gasto.pdf')],
+        ]);
+
+        $this->assertSame('APROBADO', $this->proceso->fresh()->estadoProceso->codigo);
+        $this->assertSame(7, DB::table('documentos as d')->join('estados_documento as e', 'e.id', '=', 'd.estado_documento_id')
+            ->join('tipos_documento as t', 't.id', '=', 'd.tipo_documento_id')
+            ->whereIn('t.codigo', ['CERTIFICACION_POA', 'PAC', 'CERTIFICACION_PRESUPUESTARIA', 'AUTORIZACION_GASTO'])
+            ->where('d.proceso_id', $proceso->id)->where('e.codigo', 'LEGALIZADO')->count());
+    }
+
+    private function devolucionDeLaComision(): Proceso
+    {
+        [$proceso, $comision] = $this->procesoEnComision();
+        app(ServicioInformeComision::class)->remitir($proceso, $comision, ServicioInformeComision::DEVOLUCION, [
+            'memorando' => $this->pdfTemporal('memo.pdf'), 'informe' => $this->pdfTemporal('informe.pdf'),
+        ]);
+
+        return $this->proceso->fresh();
+    }
+
+    public function test_en_para_reapertura_la_unidad_reabre_con_un_ciclo_nuevo_y_repite_el_flujo(): void
+    {
+        $proceso = $this->devolucionDeLaComision();
+        $legalizacion = app(ServicioLegalizacion::class);
+        $this->assertSame('PARA_REAPERTURA', $proceso->estadoProceso->codigo);
+
+        // el analista ya no reabre ni cierra (su 'reabrir' es interno de la devolucion sin ofertas y la pantalla lo oculta)
+        $this->assertFalse($legalizacion->puedeRemitir($proceso, $this->analista));
+        $this->assertSame([], array_intersect(['reabrir_unidad', 'cerrar_sin_reapertura'], $this->procesos->transicionesDisponibles($proceso, $this->analista)->pluck('codigo')->all()));
+        $this->assertTrue($legalizacion->puedeRemitir($proceso, $this->unidad));
+
+        $this->remitirLegalizados($proceso, $this->unidad, [24, 48], 'AIL-GER-2026-REAB-M');
+
+        $proceso = $this->proceso->fresh();
+        $this->assertSame('LEGALIZADO', $proceso->estadoProceso->codigo);
+        $this->assertSame('PREPARATORIA', $proceso->estadoMacro->codigo);
+        $this->assertSame(2, $proceso->ciclo);
+        $solicitudes = DB::table('solicitudes_publicacion')->where('proceso_id', $proceso->id)->orderBy('ciclo')->get();
+        $this->assertSame(['devuelta', 'remitida'], $solicitudes->pluck('estado')->all(), 'el ciclo 1 queda en el historial');
+        $this->assertSame([1, 2], $solicitudes->pluck('ciclo')->map(fn ($c) => (int) $c)->all());
+        $this->assertSame('AIL-GER-2026-REAB-M', $solicitudes->last()->numero_memorando);
+        $this->assertSame(2, DB::table('solicitud_publicacion_detalle')->where('solicitud_id', $solicitudes->last()->id)->count());
+        $this->assertSame(2, DB::table('documentos as d')->join('tipos_documento as t', 't.id', '=', 'd.tipo_documento_id')
+            ->where('t.codigo', 'MEMORANDO_SOLICITUD_PUBLICACION')->where('d.proceso_id', $proceso->id)->count(), 'el memorando nuevo se guarda en Documentos');
+
+        // igual que en el ciclo 1: el Jefe asigna al analista y el proceso pasa a Para publicar
+        $this->procesos->asignarAnalista($proceso, $this->analista, $this->jefe);
+        $this->assertSame('PARA_PUBLICAR', $this->proceso->fresh()->estadoProceso->codigo);
+    }
+
+    public function test_en_para_reapertura_la_unidad_cierra_sin_reapertura_con_comentario(): void
+    {
+        $proceso = $this->devolucionDeLaComision();
+        $cierre = $this->procesos->transicionesDisponibles($proceso, $this->unidad)->firstWhere('codigo', 'cerrar_sin_reapertura');
+        $this->assertNotNull($cierre);
+
+        try {
+            $this->procesos->aplicarTransicion($proceso, $cierre, $this->unidad);
+            $this->fail('Debio exigir el comentario');
+        } catch (DomainException $e) {
+            $this->assertStringContainsString('comentario', $e->getMessage());
+        }
+        $this->assertSame('PARA_REAPERTURA', $this->proceso->fresh()->estadoProceso->codigo);
+
+        $this->procesos->aplicarTransicion($proceso, $cierre, $this->unidad, 'No se continua con la contratacion');
+        $this->assertSame('CIERRE', $this->proceso->fresh()->estadoProceso->codigo);
+        $this->assertSame([], $this->procesos->transicionesDisponibles($this->proceso->fresh(), $this->unidad)->pluck('codigo')->all(), 'solo lectura');
     }
 
     public function test_sin_ofertas_y_publicaciones_agotadas_el_analista_devuelve_y_la_unidad_re_publica_en_un_ciclo_nuevo(): void
@@ -608,6 +736,130 @@ class OfertasTest extends TestCase
         $this->publicar('NC-2026-002');
         $this->registrar([$this->oferta('1790000000001', 'Proveedor A', 1, 1)]);
         $ver()->assertSeeInOrder(['Publicación N.° 1 — 0 ofertas', 'Publicación N.° 2 — 1 oferta', 'Proveedor A']);
+    }
+
+    public function test_subir_documento_no_ofrece_los_tipos_que_se_cargan_desde_un_boton(): void
+    {
+        $servicio = app(ServicioDocumento::class);
+        $tipos = $servicio->tiposDisponibles($this->proceso->fresh(), $this->analista);
+
+        foreach ([
+            'Informe de devolucion por falta de ofertas', 'Necesidad de contratacion finalizada',
+            'Memorando de designacion de la comision', 'Memorando de solicitud de la designacion de la comision',
+            'Orden de compra', 'Memorando de devolucion de expediente', 'Proforma / oferta del proveedor',
+        ] as $soloPorBoton) {
+            $this->assertFalse($tipos->contains($soloPorBoton), $soloPorBoton);
+        }
+        $this->assertTrue($tipos->contains('Otros documentos'));
+    }
+
+    public function test_la_comision_sube_otros_documentos_y_solo_modifica_los_suyos_y_van_al_expediente(): void
+    {
+        [$proceso, $comision] = $this->procesoEnComision();
+        $servicio = app(ServicioDocumento::class);
+        $otros = TipoDocumento::where('codigo', 'OTROS')->firstOrFail();
+
+        // en "Subir documento" la comision solo ve "Otros documentos"
+        $this->assertSame(['Otros documentos'], $servicio->tiposDisponibles($proceso, $comision)->values()->all());
+        $this->actingAs($comision);
+        Livewire::test(\App\Filament\Resources\Procesos\RelationManagers\DocumentosRelationManager::class, ['ownerRecord' => $proceso, 'pageClass' => ViewProceso::class])
+            ->assertTableActionVisible('subir');
+
+        [$ruta, $nombre] = $this->pdfTemporal('nota_comision.pdf');
+        $propio = $servicio->crearDocumento($proceso, $otros, null, $ruta, $nombre, null, $comision);
+        [$ruta, $nombre] = $this->pdfTemporal('ajeno_analista.pdf');
+        $ajeno = $servicio->crearDocumento($proceso, $otros, null, $ruta, $nombre, null, $this->analista);
+
+        // nueva version y eliminar: solo del propio documento
+        $this->assertTrue($servicio->puedeAgregarVersion($propio, $comision));
+        $this->assertTrue($servicio->puedeAnular($propio, $comision));
+        $this->assertFalse($servicio->puedeAgregarVersion($ajeno, $comision));
+        $this->assertFalse($servicio->puedeAnular($ajeno, $comision));
+        $this->assertFalse($servicio->puedeAnular($propio, $this->analista), 'el analista no elimina lo de la comision');
+
+        [$ruta, $nombre] = $this->pdfTemporal('nota_v2.pdf');
+        $propio = $servicio->agregarVersion($propio, $ruta, $nombre, null, $comision);
+        $this->assertSame(2, $propio->versionActual->numero_version);
+
+        // ambos "Otros documentos" se marcan por defecto en el expediente
+        $opciones = app(\App\Services\ServicioExpedientePublicacion::class)->opciones($proceso, $comision);
+        $this->assertTrue($opciones["doc_{$propio->id}"]['marcado']);
+        $this->assertTrue($opciones["doc_{$ajeno->id}"]['marcado']);
+        $this->assertContains("doc_{$ajeno->id}", app(\App\Services\ServicioExpedientePublicacion::class)->marcadasPorDefecto($proceso, $comision));
+
+        $servicio->anularDocumento($propio, $comision, 'Cargado por error');
+        $this->assertSame('ANULADO', $propio->fresh()->estadoDocumento->codigo);
+        $this->assertArrayNotHasKey("doc_{$propio->id}", app(\App\Services\ServicioExpedientePublicacion::class)->opciones($proceso, $comision));
+
+        // tras remitir el informe la comision queda en solo lectura: ya no sube ni modifica
+        [$ruta, $nombre] = $this->pdfTemporal('nota_tardia.pdf');
+        $tardio = $servicio->crearDocumento($proceso, $otros, null, $ruta, $nombre, null, $comision);
+        app(ServicioInformeComision::class)->remitir($proceso, $comision, ServicioInformeComision::DEVOLUCION, [
+            'memorando' => $this->pdfTemporal('memo.pdf'), 'informe' => $this->pdfTemporal('informe.pdf'),
+        ]);
+        $proceso = $proceso->fresh();
+        $this->assertTrue($servicio->tiposDisponibles($proceso, $comision->fresh())->isEmpty());
+        $this->assertFalse($servicio->puedeAnular($tardio->fresh(), $comision->fresh()));
+        $this->assertFalse($servicio->puedeAgregarVersion($tardio->fresh(), $comision->fresh()));
+    }
+
+    public function test_compras_genera_el_zip_de_la_fase_preparatoria_una_vez_en_precontractual(): void
+    {
+        $servicio = app(ServicioDocumento::class);
+        $expediente = app(\App\Services\ServicioExpedientePublicacion::class);
+        $otros = TipoDocumento::where('codigo', 'OTROS')->firstOrFail();
+        $proceso = $this->proceso->fresh();
+
+        // en la fase preparatoria todavia no existe el boton
+        $this->assertFalse($expediente->puedeGenerarFasePreparatoria($proceso, $this->analista));
+        [$ruta, $nombre] = $this->pdfTemporal('nota_preparatoria.pdf');
+        $servicio->crearDocumento($proceso, $otros, 'Nota preparatoria', $ruta, $nombre, null, $this->analista);
+
+        [$proceso, $comision] = $this->procesoEnComision();
+        [$ruta, $nombre] = $this->pdfTemporal('nota_comision.pdf');
+        $servicio->crearDocumento($proceso, $otros, 'Nota comision', $ruta, $nombre, null, $comision);
+
+        $this->assertTrue($expediente->puedeGenerarFasePreparatoria($proceso, $this->analista));
+        $this->assertTrue($expediente->puedeGenerarFasePreparatoria($proceso, $this->jefe));
+        $this->assertFalse($expediente->puedeGenerarFasePreparatoria($proceso, $this->unidad));
+        $this->assertFalse($expediente->puedeGenerarFasePreparatoria($proceso, $comision));
+
+        [$zipRuta, $nombreZip] = $expediente->generarFasePreparatoria($proceso, $this->analista);
+        $this->assertSame('FasePreparatoria-'.preg_replace('/[^A-Za-z0-9_-]/', '', $proceso->codigo).'.zip', $nombreZip);
+
+        $zip = new \ZipArchive;
+        $this->assertTrue($zip->open($zipRuta) === true);
+        $nombres = [];
+        for ($i = 0; $i < $zip->numFiles; $i++) {
+            $nombres[] = $zip->getNameIndex($i);
+        }
+        $zip->close();
+        @unlink($zipRuta);
+
+        $this->assertTrue(collect($nombres)->contains(fn ($n) => str_starts_with($n, '01. Informe de Necesidad/')));
+        $this->assertTrue(collect($nombres)->contains(fn ($n) => str_starts_with($n, '02. Especificaciones Técnicas/')));
+        $this->assertTrue(collect($nombres)->contains(fn ($n) => str_contains($n, 'nota_preparatoria') || str_contains($n, 'Nota_preparatoria')), 'Otros de la fase preparatoria');
+        $this->assertFalse(collect($nombres)->contains(fn ($n) => stripos($n, 'nota_comision') !== false), 'sin Otros de la comision');
+        $this->assertFalse(collect($nombres)->contains(fn ($n) => stripos($n, 'informe_seleccion') !== false || stripos($n, 'necesidad_de_contratacion') !== false), 'sin documentos de fases posteriores');
+        $this->assertSame(1, DB::table('auditoria')->where('evento', 'expediente.fase_preparatoria_generado')->count());
+    }
+
+    public function test_el_analista_elimina_y_versiona_solo_sus_otros_documentos(): void
+    {
+        $servicio = app(ServicioDocumento::class);
+        $otros = TipoDocumento::where('codigo', 'OTROS')->firstOrFail();
+        $proceso = $this->proceso->fresh();
+
+        [$ruta, $nombre] = $this->pdfTemporal('mio.pdf');
+        $mio = $servicio->crearDocumento($proceso, $otros, null, $ruta, $nombre, null, $this->analista);
+
+        $this->assertTrue($servicio->puedeAgregarVersion($mio, $this->analista));
+        $this->assertTrue($servicio->puedeAnular($mio, $this->analista));
+        $this->assertFalse($servicio->puedeAnular($mio, $this->jefe), 'otro usuario no elimina un documento ajeno');
+
+        $servicio->anularDocumento($mio, $this->analista, 'Duplicado');
+        $this->assertSame('ANULADO', $mio->fresh()->estadoDocumento->codigo);
+        $this->assertSame(1, DB::table('historial_estados_proceso')->where('proceso_id', $proceso->id)->where('comentario', 'like', 'Documento eliminado:%Motivo: Duplicado')->count());
     }
 
     public function test_aviso_de_designacion_segun_el_mayor_monto_total(): void

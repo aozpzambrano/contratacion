@@ -41,7 +41,7 @@ END $$;
 DO $prueba$
 DECLARE
     u_ur bigint; u_cj bigint; u_ca bigint; u_ct bigint; u_ac bigint; u_x bigint;
-    v_p bigint; v_p2 bigint; v_p3 bigint; v_tmp bigint; v_d2 bigint; v_ver2 bigint; v_it1 bigint; v_it2 bigint;
+    v_p bigint; v_p2 bigint; v_p3 bigint; v_p4 bigint; v_tmp bigint; v_d2 bigint; v_ver2 bigint; v_it1 bigint; v_it2 bigint;
     v_pub1 bigint; v_pub2 bigint; v_d bigint; v_arch bigint; v_ver bigint; v_rev bigint; v_obs bigint;
     v_prov bigint[]; v_of bigint[]; v_oc bigint; v_ent bigint; i int;
     f_prep bigint; f_pre bigint; f_con bigint;
@@ -106,7 +106,9 @@ BEGIN
         'enviar_a_revision -> EN_REVISION con permiso y asignacion');
 
     -- 4. Ciclo documental: version, revision, observacion, correccion
-    SELECT id INTO v_doc_tipo FROM tipos_documento WHERE codigo='PAC';
+    -- tipo con revision y, solo para esta prueba, de documento unico por proceso
+    UPDATE tipos_documento SET permite_multiples = false WHERE codigo='DOCUMENTACION_COMPLEMENTARIA';
+    SELECT id INTO v_doc_tipo FROM tipos_documento WHERE codigo='DOCUMENTACION_COMPLEMENTARIA';
     INSERT INTO documentos (proceso_id,tipo_documento_id,estado_documento_id,titulo,creado_por)
         VALUES (v_p,v_doc_tipo,(SELECT id FROM estados_documento WHERE codigo='BORRADOR'),'Expediente',u_ur) RETURNING id INTO v_d;
     PERFORM pg_temp.falla(format('SELECT aplicar_transicion_documento(%s,%L,%s)',v_d,'enviar_a_revision',u_ur),'ninguna version');
@@ -154,6 +156,7 @@ BEGIN
     -- un solo documento por tipo y proceso (las correcciones son versiones); 'OTROS' admite varios
     PERFORM pg_temp.falla(format('INSERT INTO documentos (proceso_id,tipo_documento_id,estado_documento_id,titulo,creado_por) VALUES (%s,%s,(SELECT id FROM estados_documento WHERE codigo=%L),%L,%s)',
         v_p,v_doc_tipo,'BORRADOR','Duplicado',u_ur),'cargue una nueva version');
+    UPDATE tipos_documento SET permite_multiples = true WHERE codigo='DOCUMENTACION_COMPLEMENTARIA';
     PERFORM pg_temp.verifica(
         (SELECT permite_multiples FROM tipos_documento WHERE codigo='OTROS')
         AND NOT (SELECT permite_multiples FROM tipos_documento WHERE codigo='INFORME_NECESIDAD')
@@ -364,6 +367,22 @@ BEGIN
     PERFORM pg_temp.falla(format('SELECT aplicar_transicion_proceso(%s,%L,%s)',v_p,'remitir_informe_seleccion',u_ct),'Faltan documentos requeridos');
     PERFORM aplicar_transicion_documento(v_tmp,'registrar_legalizado',u_ct);
     PERFORM aplicar_transicion_proceso(v_p,'remitir_informe_seleccion',u_ct);
+    PERFORM pg_temp.verifica((SELECT ep.codigo FROM procesos p JOIN estados_proceso ep ON ep.id=p.estado_proceso_id WHERE p.id=v_p)='PARA_CERTIFICACIONES',
+        'el informe de seleccion pasa el proceso a la unidad (Para certificaciones)');
+    -- La unidad registra las cuatro certificaciones (PDF legalizados); sin alguna, no avanza
+    PERFORM pg_temp.falla(format('SELECT aplicar_transicion_proceso(%s,%L,%s)',v_p,'remitir_certificaciones',u_ca),'no tiene el permiso');
+    FOR i IN 1..4 LOOP
+        v_tmp := pg_temp.cargar_documento(v_p, CASE i WHEN 1 THEN 'CERTIFICACION_POA' WHEN 2 THEN 'PAC'
+                 WHEN 3 THEN 'CERTIFICACION_PRESUPUESTARIA' ELSE 'AUTORIZACION_GASTO' END, u_ur);
+        PERFORM aplicar_transicion_documento(v_tmp,'registrar_sin_revision',u_ur);
+        PERFORM pg_temp.falla(format('SELECT aplicar_transicion_proceso(%s,%L,%s)',v_p,'remitir_certificaciones',u_ur),'Faltan documentos requeridos');
+        INSERT INTO legalizaciones (documento_version_id,user_id,archivo_id)
+            SELECT version_actual_id,u_ur,(SELECT archivo_id FROM documento_versiones WHERE id=version_actual_id) FROM documentos WHERE id=v_tmp;
+        PERFORM aplicar_transicion_documento(v_tmp,'legalizar',u_ur);
+    END LOOP;
+    PERFORM aplicar_transicion_proceso(v_p,'remitir_certificaciones',u_ur);
+    PERFORM pg_temp.verifica((SELECT ep.codigo FROM procesos p JOIN estados_proceso ep ON ep.id=p.estado_proceso_id WHERE p.id=v_p)='APROBADO',
+        'con las cuatro certificaciones legalizadas el proceso queda Aprobado');
 
     -- 8. Orden de compra, entregas y cierre
     PERFORM aplicar_transicion_proceso(v_p,'generar_expediente',u_cj);
@@ -379,7 +398,7 @@ BEGIN
     PERFORM pg_temp.verifica((SELECT em.codigo||'/'||ep.codigo FROM procesos p JOIN estados_macro em ON em.id=p.estado_macro_id
         JOIN estados_proceso ep ON ep.id=p.estado_proceso_id WHERE p.id=v_p)='FINALIZADO/CIERRE',
         'flujo completo hasta FINALIZADO/CIERRE');
-    PERFORM pg_temp.verifica((SELECT count(*) FROM historial_estados_proceso WHERE proceso_id=v_p)=18,
+    PERFORM pg_temp.verifica((SELECT count(*) FROM historial_estados_proceso WHERE proceso_id=v_p)=19,
         'historial del proceso con 17 movimientos y el documento eliminado');
     PERFORM pg_temp.verifica((SELECT count(*) FROM historial_estados_proceso h JOIN transiciones_proceso t ON t.id=h.transicion_id
         WHERE h.proceso_id=v_p AND t.codigo='eliminar_documento' AND h.comentario LIKE 'Documento eliminado:%Motivo: Se reemplaza')=1,
@@ -388,6 +407,15 @@ BEGIN
     -- 9. Devolucion y reapertura (el analista decide segun el memorando)
     INSERT INTO procesos (tipo_proceso_id,objeto_contratacion,estado_macro_id,estado_proceso_id,creado_por)
         VALUES (v_tp,'Proceso devuelto',v_mac,v_ini,u_ur) RETURNING id INTO v_p2;
+    -- "Otros documentos": solo quien los cargo puede eliminarlos (con "Subir documentos"); los de otro usuario, no
+    v_tmp := pg_temp.cargar_documento(v_p2,'OTROS',u_ur);
+    PERFORM pg_temp.falla(format('SELECT aplicar_transicion_documento(%s,%L,%s,%L)',v_tmp,'anular',u_ca,'No es mio'),'no tiene el permiso');
+    v_tmp := pg_temp.cargar_documento(v_p2,'OTROS',u_ca);
+    PERFORM aplicar_transicion_documento(v_tmp,'anular',u_ca,'Lo cargue yo');
+    PERFORM pg_temp.verifica((SELECT e.codigo FROM documentos d JOIN estados_documento e ON e.id=d.estado_documento_id WHERE d.id=v_tmp)='ANULADO',
+        'el autor elimina su propio documento de Otros documentos');
+    v_tmp := pg_temp.cargar_documento(v_p2,'INFORME_NECESIDAD',u_ca);
+    PERFORM pg_temp.falla(format('SELECT aplicar_transicion_documento(%s,%L,%s,%L)',v_tmp,'anular',u_ca,'Otro tipo'),'no tiene el permiso');
     INSERT INTO asignaciones_proceso (proceso_id,user_id,rol_id,fase_id,asignado_por)
         VALUES (v_p2,u_ca,(SELECT id FROM roles WHERE codigo='COMPRAS_ANALISTA'),f_pre,u_cj);
     PERFORM set_config('app.transicion_en_curso','procesos',true);   -- solo para preparar el escenario
@@ -423,14 +451,35 @@ BEGIN
         VALUES (v_tp,'Sin reapertura',v_mac,v_ini,u_ur) RETURNING id INTO v_p3;
     INSERT INTO asignaciones_proceso (proceso_id,user_id,rol_id,fase_id,asignado_por)
         VALUES (v_p3,u_ca,(SELECT id FROM roles WHERE codigo='COMPRAS_ANALISTA'),f_pre,u_cj);
+    INSERT INTO asignaciones_proceso (proceso_id,user_id,rol_id,fase_id,asignado_por)
+        VALUES (v_p3,u_ur,(SELECT id FROM roles WHERE codigo='UNIDAD_REQUIRENTE'),f_pre,u_cj);
     PERFORM set_config('app.transicion_en_curso','procesos',true);
     UPDATE procesos SET estado_proceso_id=(SELECT id FROM estados_proceso WHERE codigo='PARA_REAPERTURA'),
                         estado_macro_id=(SELECT id FROM estados_macro WHERE codigo='PRECONTRACTUAL') WHERE id=v_p3;
     PERFORM set_config('app.transicion_en_curso','',true);
     INSERT INTO devoluciones (proceso_id,motivo,reapertura_permitida,user_id) VALUES (v_p3,'Desierto',false,u_ca);
-    PERFORM pg_temp.falla(format('SELECT aplicar_transicion_proceso(%s,%L,%s,%L)',v_p3,'reabrir',u_ca,'x'),'no autoriza la reapertura');
-    PERFORM aplicar_transicion_proceso(v_p3,'cerrar_sin_reapertura',u_ca,'Memorando sin reapertura');
-    PERFORM pg_temp.verifica(true,'devolucion sin reapertura solo permite cerrar');
+    PERFORM pg_temp.falla(format('SELECT aplicar_transicion_proceso(%s,%L,%s,%L)',v_p3,'reabrir_unidad',u_ur,'x'),'no autoriza la reapertura');
+    PERFORM pg_temp.falla(format('SELECT aplicar_transicion_proceso(%s,%L,%s,%L)',v_p3,'cerrar_sin_reapertura',u_ca,'x'),'no tiene el permiso');
+    PERFORM pg_temp.falla(format('SELECT aplicar_transicion_proceso(%s,%L,%s,%L)',v_p3,'cerrar_sin_reapertura',u_ur,NULL),'exige un comentario');
+    PERFORM aplicar_transicion_proceso(v_p3,'cerrar_sin_reapertura',u_ur,'Memorando sin reapertura');
+    PERFORM pg_temp.verifica((SELECT ep.codigo FROM procesos p JOIN estados_proceso ep ON ep.id=p.estado_proceso_id WHERE p.id=v_p3)='CIERRE',
+        'la unidad cierra sin reapertura con comentario y el analista no puede');
+
+    -- la unidad reabre una devolucion que lo permite: nuevo ciclo
+    INSERT INTO procesos (tipo_proceso_id,objeto_contratacion,estado_macro_id,estado_proceso_id,creado_por)
+        VALUES (v_tp,'Reapertura por la unidad',v_mac,v_ini,u_ur) RETURNING id INTO v_p4;
+    INSERT INTO asignaciones_proceso (proceso_id,user_id,rol_id,fase_id,asignado_por)
+        VALUES (v_p4,u_ur,(SELECT id FROM roles WHERE codigo='UNIDAD_REQUIRENTE'),f_pre,u_cj);
+    PERFORM set_config('app.transicion_en_curso','procesos',true);
+    UPDATE procesos SET estado_proceso_id=(SELECT id FROM estados_proceso WHERE codigo='PARA_REAPERTURA'),
+                        estado_macro_id=(SELECT id FROM estados_macro WHERE codigo='PREPARATORIA') WHERE id=v_p4;
+    PERFORM set_config('app.transicion_en_curso','',true);
+    INSERT INTO devoluciones (proceso_id,motivo,reapertura_permitida,user_id) VALUES (v_p4,'Recomendacion de la comision',true,u_ca);
+    PERFORM pg_temp.falla(format('SELECT aplicar_transicion_proceso(%s,%L,%s,%L)',v_p4,'reabrir_unidad',u_ca,'x'),'no tiene el permiso');
+    PERFORM aplicar_transicion_proceso(v_p4,'reabrir_unidad',u_ur,NULL);
+    PERFORM pg_temp.verifica((SELECT ciclo FROM procesos WHERE id=v_p4)=2
+        AND (SELECT ep.codigo FROM procesos p JOIN estados_proceso ep ON ep.id=p.estado_proceso_id WHERE p.id=v_p4)='PARA_REPUBLICAR',
+        'la unidad reabre: nuevo ciclo en Para Re-publicar');
 
     -- 10. Documentos requeridos configurables por transicion
     INSERT INTO procesos (tipo_proceso_id,objeto_contratacion,estado_macro_id,estado_proceso_id,creado_por)

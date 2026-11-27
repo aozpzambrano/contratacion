@@ -25,7 +25,10 @@ class ServicioLegalizacion
 
     public const MAX_HORAS = 8760;
 
-    public const TRANSICIONES = ['remitir_legalizados', 'remitir_republicacion'];
+    public const TRANSICIONES = ['remitir_legalizados', 'remitir_republicacion', self::REABRIR];
+
+    /** La unidad reabre un proceso en "Para reapertura": nuevo ciclo con el mismo flujo del ciclo 1. */
+    public const REABRIR = 'reabrir_unidad';
 
     public const TIPO_DISTRIBUTIVO = 'DISTRIBUTIVO';
 
@@ -55,9 +58,14 @@ class ServicioLegalizacion
      */
     public function tiposAdicionalesPendientes(Proceso $proceso): Collection
     {
+        // al reabrir (Para reapertura) los requisitos son los de "Remitir" desde Para Re-publicar
+        $estadoOrigen = $proceso->estadoProceso?->codigo === 'PARA_REAPERTURA'
+            ? DB::table('estados_proceso')->where('codigo', 'PARA_REPUBLICAR')->value('id')
+            : $proceso->estado_proceso_id;
+
         $requeridos = DB::table('transicion_proceso_requisitos as rq')
             ->join('transiciones_proceso as t', 't.id', '=', 'rq.transicion_id')
-            ->where('t.estado_origen_id', $proceso->estado_proceso_id)
+            ->where('t.estado_origen_id', $estadoOrigen)
             ->whereIn('t.codigo', self::TRANSICIONES)
             ->pluck('rq.tipo_documento_id');
 
@@ -108,6 +116,11 @@ class ServicioLegalizacion
                 ?? throw new DomainException('El tipo de documento "Memorando de solicitud de publicación" no está disponible.');
 
             DB::transaction(function () use ($proceso, $usuario, $transicion, $pendientes, $legalizados, $memorando, $tipoMemorando, $numeroMemorando, $horas, $adicionales, $distributivos) {
+                // Reapertura: los datos del ciclo anterior quedan en el historial y se abre el ciclo nuevo
+                if ($transicion->codigo === self::REABRIR) {
+                    $transicion = $this->abrirNuevoCiclo($proceso, $usuario, $transicion);
+                }
+
                 foreach ($pendientes as $documento) {
                     [$ruta, $nombre] = $legalizados[$documento->id];
                     $this->documentos->legalizarDocumento($documento, $ruta, $nombre, $usuario);
@@ -175,6 +188,31 @@ class ServicioLegalizacion
             $this->limpiar($temporales);
             throw $e;
         }
+    }
+
+    /**
+     * Reabre el proceso: la solicitud de publicacion del ciclo anterior queda "devuelta" (historial), el proceso pasa a
+     * Para Re-publicar con el ciclo siguiente y se devuelve la transicion "Remitir" que continua el mismo flujo.
+     */
+    private function abrirNuevoCiclo(Proceso $proceso, User $usuario, TransicionProceso $reabrir): TransicionProceso
+    {
+        $motivo = 'Reapertura del proceso por la unidad requirente: nuevo ciclo.';
+        DB::table('solicitudes_publicacion')
+            ->where('proceso_id', $proceso->id)->where('estado', 'remitida')
+            ->update([
+                'estado' => 'devuelta',
+                'devuelta_por' => $usuario->id,
+                'fecha_devolucion' => now(),
+                'motivo_devolucion' => $motivo,
+                'updated_at' => now(),
+            ]);
+
+        $this->procesos->aplicarTransicion($proceso, $reabrir, $usuario, $motivo);
+        $proceso->refresh()->unsetRelation('estadoProceso');
+        $proceso->unsetRelation('estadoMacro');
+
+        return $this->transicionRemitir($proceso, $usuario)
+            ?? throw new DomainException('No se pudo continuar con la remisión después de reabrir el proceso.');
     }
 
     /** @return array<int, int> horas validadas */

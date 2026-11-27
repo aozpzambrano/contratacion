@@ -26,7 +26,7 @@ class ServicioOferta
     /** Archivos que se pueden cargar por oferta (una carpeta del proveedor se sube como varios archivos o como ZIP). */
     public const MAX_ARCHIVOS_POR_OFERTA = 50;
 
-    public const EXTENSIONES_OFERTA = ['pdf', 'doc', 'docx', 'xls', 'xlsx', 'zip', 'jpg', 'jpeg', 'png'];
+    public const EXTENSIONES_OFERTA = ['pdf', 'doc', 'docx', 'xls', 'xlsx', 'zip'];
 
     public function __construct(private readonly ServicioProceso $procesos) {}
 

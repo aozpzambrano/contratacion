@@ -450,7 +450,10 @@ class LegalizacionTest extends TestCase
             ->assertActionVisible('transicion_remitir_legalizados')
             ->assertSee('Remitir documentos legalizados');
 
+        // el analista ya no tiene el proceso (se retira al validar la documentacion); el Jefe no ve el boton de la unidad
         $this->actingAs($this->analista);
+        $this->assertFalse($this->analista->can('view', $this->proceso->fresh()));
+        $this->actingAs($this->jefe);
         Livewire::test(ViewProceso::class, ['record' => $this->proceso->getRouteKey()])
             ->assertActionDoesNotExist('transicion_remitir_legalizados');
 

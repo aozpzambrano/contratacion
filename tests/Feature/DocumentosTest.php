@@ -283,20 +283,17 @@ class DocumentosTest extends TestCase
     public function test_el_memorando_de_publicacion_es_solo_pdf_y_admite_varios(): void
     {
         [$unidad, $p] = $this->unidadConProceso();
-        // en Inicio solo se cargan Informe de Necesidad y Especificaciones Tecnicas: el memorando se sube en una etapa posterior
-        DB::select("select set_config('app.transicion_en_curso', 'procesos', false)");
-        DB::table('procesos')->where('id', $p->id)
-            ->update(['estado_proceso_id' => DB::table('estados_proceso')->where('codigo', 'EN_CORRECCION')->value('id')]);
-        DB::select("select set_config('app.transicion_en_curso', '', false)");
-        $p = $p->fresh();
+        // el memorando ya no se carga desde "Subir documento" (lo registra la remision de legalizados): se prueba el guardado interno
+        $tipo = TipoDocumento::where('codigo', 'MEMORANDO_SOLICITUD_PUBLICACION')->firstOrFail();
+        $guardar = fn (string $nombre) => $this->servicio->guardarInterno($p, $tipo, null, $this->temporal("%PDF-1.4\ncontenido"), $nombre, null, $unidad);
 
-        $this->subir($p, $unidad, 'MEMORANDO_SOLICITUD_PUBLICACION', 'memo1.pdf');
-        $this->subir($p, $unidad, 'MEMORANDO_SOLICITUD_PUBLICACION', 'memo2.pdf');
+        $guardar('memo1.pdf');
+        $guardar('memo2.pdf');
         $this->assertSame(2, Documento::count());
 
         $this->expectException(DomainException::class);
         $this->expectExceptionMessage('Tipo de archivo no permitido');
-        $this->subir($p, $unidad, 'MEMORANDO_SOLICITUD_PUBLICACION', 'memo3.docx');
+        $this->servicio->guardarInterno($p, $tipo, null, $this->temporal('contenido de prueba'), 'memo3.docx', null, $unidad);
     }
 
     public function test_solo_la_ultima_version_se_descarga_las_anteriores_son_respaldo(): void
@@ -371,7 +368,7 @@ class DocumentosTest extends TestCase
         Livewire::test(DocumentosRelationManager::class, ['ownerRecord' => $p, 'pageClass' => ViewProceso::class])
             ->assertCanSeeTableRecords([$d])
             ->assertTableActionVisible('descargar', $d)
-            ->assertTableActionVisible('nueva_version', $d);
+            ->assertTableActionHidden('nueva_version', $d); // la unidad corrige desde "Enviar a revision"
 
         $jefe = User::factory()->conRoles('COMPRAS_JEFE')->create();
         $this->actingAs($jefe);

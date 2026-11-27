@@ -101,13 +101,49 @@ class RevisionDocumentosTest extends TestCase
         $this->documentos->agregarVersion($d->fresh(), $ruta, $nombre, 'Se agrego la firma', $this->unidad);
     }
 
+    public function test_un_documento_con_version_nueva_del_analista_siempre_se_corrige_y_no_se_valida(): void
+    {
+        $ruta = 'temporal/'.uniqid('a', true).'.tmp';
+        Storage::disk(ServicioDocumento::DISCO)->put($ruta, "%PDF-1.4\najuste del analista");
+        $this->documentos->agregarVersion($this->informe->fresh(), $ruta, 'ajuste.pdf', 'ajuste menor', $this->analista);
+        $this->assertTrue($this->documentos->tieneVersionDelAnalista($this->informe->fresh()));
+        $this->assertFalse($this->documentos->tieneVersionDelAnalista($this->especificaciones->fresh()));
+
+        // hay cambios pendientes: no se valida la documentacion
+        try {
+            $this->procesos->aplicarTransicion($this->proceso->fresh(), $this->transicion('validar_documentacion'), $this->analista);
+            $this->fail('Debio impedir validar con cambios pendientes');
+        } catch (DomainException $e) {
+            $this->assertStringContainsString('cambios pendientes', $e->getMessage());
+        }
+        $this->assertSame('EN_REVISION', $this->estadoProceso());
+        $this->assertSame('PENDIENTE_REVISION', $this->estado($this->informe));
+
+        // aunque solo se elija el otro, el de la version nueva tambien se remite a correccion
+        $this->remitirObservaciones('x', [$this->especificaciones->id]);
+        $this->assertSame('CON_OBSERVACIONES', $this->estado($this->informe));
+        $this->assertSame('CON_OBSERVACIONES', $this->estado($this->especificaciones));
+    }
+
+    public function test_sin_elegir_ninguno_se_remite_solo_el_de_la_version_nueva(): void
+    {
+        $ruta = 'temporal/'.uniqid('a', true).'.tmp';
+        Storage::disk(ServicioDocumento::DISCO)->put($ruta, "%PDF-1.4\najuste");
+        $this->documentos->agregarVersion($this->informe->fresh(), $ruta, 'ajuste.pdf', null, $this->analista);
+
+        $this->remitirObservaciones('x', []);
+
+        $this->assertSame('CON_OBSERVACIONES', $this->estado($this->informe));
+        $this->assertSame('REVISADO', $this->estado($this->especificaciones));
+    }
+
     public function test_las_observaciones_se_registran_solo_en_los_documentos_elegidos(): void
     {
         $this->remitirObservaciones('Falta la firma del responsable', [$this->informe->id]);
 
         $this->assertSame('EN_CORRECCION', $this->estadoProceso());
         $this->assertSame('CON_OBSERVACIONES', $this->estado($this->informe));
-        $this->assertSame('PENDIENTE_REVISION', $this->estado($this->especificaciones), 'el no elegido se considera correcto');
+        $this->assertSame('REVISADO', $this->estado($this->especificaciones), 'el no elegido queda revisado');
         $this->assertSame(1, DB::table('revisiones')->where('resultado', 'con_observaciones')->count());
         $this->assertDatabaseHas('observaciones', ['texto' => 'Falta la firma del responsable', 'user_id' => $this->analista->id]);
         $this->assertSame(0, DB::table('asignaciones_documento')->where('activo', true)->count());
@@ -163,7 +199,7 @@ class RevisionDocumentosTest extends TestCase
 
         $this->assertSame('EN_REVISION', $this->estadoProceso());
         $this->assertSame('PENDIENTE_REVISION', $this->estado($this->informe));
-        $this->assertSame('PENDIENTE_REVISION', $this->estado($this->especificaciones));
+        $this->assertSame('REVISADO', $this->estado($this->especificaciones));
         $this->assertSame(1, DB::table('correcciones')->where('descripcion', 'Se agrego la firma')->where('user_id', $this->unidad->id)->count());
     }
 
@@ -178,13 +214,14 @@ class RevisionDocumentosTest extends TestCase
         $this->assertSame(2, DB::table('revisiones')->where('resultado', 'aprobada')->count());
     }
 
-    public function test_tras_validar_el_analista_solo_ve_hasta_que_el_jefe_lo_asigne_de_nuevo(): void
+    public function test_tras_validar_se_retira_al_analista_hasta_que_el_jefe_lo_asigne_de_nuevo(): void
     {
         $this->procesos->aplicarTransicion($this->proceso->fresh(), $this->transicion('validar_documentacion'), $this->analista);
         $p = $this->proceso->fresh();
 
-        // sigue viendo el proceso y sus documentos, pero sin acciones
-        $this->assertTrue($this->analista->can('view', $p));
+        // el proceso queda para la unidad: la asignacion del analista se retira y ya no lo ve
+        $this->assertSame(0, $p->asignaciones()->where('user_id', $this->analista->id)->where('activo', true)->count());
+        $this->assertFalse($this->analista->can('view', $p));
         $this->assertSame([], $this->procesos->transicionesDisponibles($p, $this->analista)->pluck('codigo')->all());
         $this->assertFalse($this->documentos->puedeAgregarVersion($this->informe->fresh(), $this->analista));
         $this->assertFalse($this->analista->can('update', $p));
@@ -226,7 +263,44 @@ class RevisionDocumentosTest extends TestCase
             ->assertHasNoActionErrors();
 
         $this->assertSame('CON_OBSERVACIONES', $this->estado($this->especificaciones));
-        $this->assertSame('PENDIENTE_REVISION', $this->estado($this->informe));
+        $this->assertSame('REVISADO', $this->estado($this->informe));
         $this->assertSame('EN_CORRECCION', $this->estadoProceso());
+    }
+
+    public function test_la_pantalla_marca_el_documento_con_version_nueva_y_permite_confirmar(): void
+    {
+        foreach (['informe', 'especificaciones'] as $doc) {
+            $ruta = 'temporal/'.uniqid('a', true).'.tmp';
+            Storage::disk(ServicioDocumento::DISCO)->put($ruta, "%PDF-1.4\n{$doc}");
+            $this->documentos->agregarVersion($this->{$doc}->fresh(), $ruta, $doc.'.pdf', null, $this->analista);
+        }
+        $this->actingAs($this->analista);
+
+        Livewire::test(ViewProceso::class, ['record' => $this->proceso->getRouteKey()])
+            ->callAction('transicion_solicitar_correcciones', ['documentos' => [$this->informe->id, $this->especificaciones->id], 'comentario' => null])
+            ->assertHasNoActionErrors();
+
+        $this->assertSame('EN_CORRECCION', $this->estadoProceso());
+        $this->assertSame('CON_OBSERVACIONES', $this->estado($this->informe));
+        $this->assertSame('CON_OBSERVACIONES', $this->estado($this->especificaciones));
+    }
+
+    public function test_el_revisado_se_aprueba_al_validar_y_el_analista_no_le_agrega_version(): void
+    {
+        $this->remitirObservaciones('Falta la firma', [$this->informe->id]);
+        $this->assertSame('REVISADO', $this->estado($this->especificaciones));
+        // un documento revisado ya no admite "Nueva version" del analista
+        $this->assertFalse($this->documentos->puedeAgregarVersion($this->especificaciones->fresh(), $this->analista));
+
+        // la unidad corrige solo el observado y reenvia: el revisado se mantiene
+        $this->subirVersion($this->informe, 'informe_v2.pdf');
+        $this->procesos->aplicarTransicion($this->proceso->fresh(), $this->transicion('reenviar_a_revision'), $this->unidad);
+        $this->assertSame('PENDIENTE_REVISION', $this->estado($this->informe));
+        $this->assertSame('REVISADO', $this->estado($this->especificaciones));
+
+        $this->procesos->aplicarTransicion($this->proceso->fresh(), $this->transicion('validar_documentacion'), $this->analista);
+        $this->assertSame('PARA_LEGALIZAR', $this->estadoProceso());
+        $this->assertSame('APROBADO', $this->estado($this->informe));
+        $this->assertSame('APROBADO', $this->estado($this->especificaciones));
     }
 }
